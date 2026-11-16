@@ -1,0 +1,97 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-serif: 'Cormorant Garamond', Georgia, serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    overflow-x: hidden;
+  }
+
+  h1, h2, .font-editorial {
+    font-family: var(--font-serif);
+    text-wrap: balance;
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@keyframes shimmerSlide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes aetherBorderSpin {
+  0% {
+    transform: translate(-50%, -50%) rotate(0deg);
+  }
+  100% {
+    transform: translate(-50%, -50%) rotate(360deg);
+  }
+}
+
+@keyframes aetherPrismSweep {
+  0% {
+    transform: translateX(-140%) skewX(-22deg);
+    opacity: 0;
+  }
+  25% {
+    opacity: 0.85;
+  }
+  75% {
+    opacity: 0.85;
+  }
+  100% {
+    transform: translateX(240%) skewX(-22deg);
+    opacity: 0;
+  }
+}
+
+@keyframes aetherEtchBreathe {
+  0%,
+  100% {
+    opacity: 0.32;
+    transform: scale(0.985);
+  }
+  50% {
+    opacity: 0.88;
+    transform: scale(1.015);
+  }
+}
+
+.animate-shimmer {
+  animation: shimmerSlide 1.6s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+.animate-border-beam {
+  animation: aetherBorderSpin 4.2s linear infinite;
+}
+
+.animate-prism-sweep {
+  animation: aetherPrismSweep 2.8s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+.animate-etch-breathe {
+  animation: aetherEtchBreathe 3.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-shimmer,
+  .animate-border-beam,
+  .animate-prism-sweep,
+  .animate-etch-breathe {
+    animation: none !important;
+  }
+}
+
