@@ -12,11 +12,13 @@ import {
   LayoutGrid,
   Save,
   Search,
+  Server,
   Trash2,
   Upload,
 } from 'lucide-react';
 import { useStudio } from '../context/StudioContext';
 import { hapticAudio } from '../lib/hapticAudioEngine';
+import { compressImageDataUrlForApi } from '../lib/localDiskWorkspace';
 import {
   downloadLocalArchitectureFile,
   serializeScreenMapToMermaid,
@@ -282,6 +284,8 @@ interface LoadedClientFileState {
   fileName: string;
   mimeType: string;
   fileSize: number;
+  compressedKb?: number;
+  rawFile?: File;
   base64Data?: string;
   textContent?: string;
   previewDataUrl?: string;
@@ -303,6 +307,10 @@ export const FileUploadBuildMatrixService: React.FC<{
     activeBuildMatrix,
     savedBuildMatrices,
     generatePlanAndMatrixFromFile,
+    generateFullFrontendFromUploadedFile,
+    setLocalhostModalOpen,
+    zeroLimitLocalMode,
+    setZeroLimitLocalMode,
     selectSavedBuildMatrix,
     removeSavedBuildMatrix,
     pulseInteraction,
@@ -353,7 +361,7 @@ export const FileUploadBuildMatrixService: React.FC<{
     const mimeType = inferMimeTypeFromName(file.name, file.type);
 
     if (BINARY_INLINE_MIMES.has(mimeType)) {
-      const dataUrl = await new Promise<string>((resolve, reject) => {
+      const rawDataUrl = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result || ''));
         reader.onerror = () =>
@@ -361,16 +369,33 @@ export const FileUploadBuildMatrixService: React.FC<{
         reader.readAsDataURL(file);
       });
 
-      const base64Part = dataUrl.includes(',')
-        ? dataUrl.split(',')[1] || ''
-        : dataUrl;
+      let finalDataUrl = rawDataUrl;
+      let finalMime = mimeType;
+      let compressedKb: number | undefined;
+
+      if (mimeType.startsWith('image/')) {
+        try {
+          const compressed = await compressImageDataUrlForApi(rawDataUrl, 1280, 0.82);
+          finalDataUrl = compressed.dataUrl;
+          finalMime = compressed.mimeType;
+          compressedKb = compressed.compressedSizeKb;
+        } catch {
+          // Keep original dataUrl if canvas compression fails
+        }
+      }
+
+      const base64Part = finalDataUrl.includes(',')
+        ? finalDataUrl.split(',')[1] || ''
+        : finalDataUrl;
 
       setLoadedFile({
         fileName: file.name,
-        mimeType,
+        mimeType: finalMime,
         fileSize: file.size,
+        compressedKb,
+        rawFile: file,
         base64Data: base64Part,
-        previewDataUrl: mimeType.startsWith('image/') ? dataUrl : undefined,
+        previewDataUrl: finalMime.startsWith('image/') ? finalDataUrl : undefined,
       });
     } else {
       const text = await file.text();
@@ -384,6 +409,7 @@ export const FileUploadBuildMatrixService: React.FC<{
         fileName: file.name,
         mimeType,
         fileSize: file.size,
+        rawFile: file,
         textContent: text,
       });
     }
@@ -414,11 +440,14 @@ export const FileUploadBuildMatrixService: React.FC<{
 
   const handleLoadSampleStarter = (sample: SampleStarterFile) => {
     setErrorMsg(null);
-    const byteLen = new Blob([sample.content]).size;
+    const sampleFile = new File([sample.content], sample.fileName, {
+      type: sample.mimeType,
+    });
     setLoadedFile({
       fileName: sample.fileName,
       mimeType: sample.mimeType,
-      fileSize: byteLen,
+      fileSize: sampleFile.size,
+      rawFile: sampleFile,
       textContent: sample.content,
     });
     setTargetType(sample.targetType);
@@ -441,15 +470,20 @@ export const FileUploadBuildMatrixService: React.FC<{
     setSavedBanner(false);
 
     try {
-      const { buildMatrix } = await generatePlanAndMatrixFromFile({
-        fileName: loadedFile.fileName,
-        mimeType: loadedFile.mimeType,
-        fileSize: loadedFile.fileSize,
-        base64Data: loadedFile.base64Data,
-        textContent: loadedFile.textContent,
-        projectGoal: projectGoal.trim() || undefined,
-        targetType,
-      });
+      const { buildMatrix } = loadedFile.rawFile
+        ? await generateFullFrontendFromUploadedFile(loadedFile.rawFile, {
+            projectGoal: projectGoal.trim() || undefined,
+            targetType,
+          })
+        : await generatePlanAndMatrixFromFile({
+            fileName: loadedFile.fileName,
+            mimeType: loadedFile.mimeType,
+            fileSize: loadedFile.fileSize,
+            base64Data: loadedFile.base64Data,
+            textContent: loadedFile.textContent,
+            projectGoal: projectGoal.trim() || undefined,
+            targetType,
+          });
 
       if (
         buildMatrix.targetType === 'webapp-only' &&
@@ -463,7 +497,7 @@ export const FileUploadBuildMatrixService: React.FC<{
       setErrorMsg(
         err instanceof Error
           ? err.message
-          : 'Wystąpił błąd podczas analizy pliku przez AI.'
+          : 'Wystąpił błąd podczas analizy pliku.'
       );
     } finally {
       setGenerating(false);
@@ -607,43 +641,62 @@ export const FileUploadBuildMatrixService: React.FC<{
           </p>
         </div>
 
-        {savedBuildMatrices.length > 0 && (
-          <div className="flex items-center gap-2">
-            <label
-              htmlFor="saved-file-matrices-select"
-              className="text-xs text-slate-500 dark:text-emerald-300/80 whitespace-nowrap"
-            >
-              Wcześniejsze pliki:
-            </label>
-            <select
-              id="saved-file-matrices-select"
-              value={activeBuildMatrix?.id || ''}
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="min-h-[40px] px-3 py-1.5 rounded-xl text-xs font-medium bg-white/85 dark:bg-emerald-950/75 border border-slate-200/80 dark:border-emerald-400/25 text-slate-800 dark:text-emerald-100 inline-flex items-center gap-2 cursor-pointer whitespace-nowrap">
+            <input
+              type="checkbox"
+              checked={zeroLimitLocalMode}
               onChange={(e) => {
-                const chosen = savedBuildMatrices.find(
-                  (m) => m.id === e.target.value
-                );
-                if (chosen) selectSavedBuildMatrix(chosen);
+                setZeroLimitLocalMode(e.target.checked);
+                hapticAudio.triggerPress(synth, haptic, patterns);
               }}
-              className="min-h-[40px] px-3 py-1.5 rounded-xl text-xs bg-white/85 dark:bg-emerald-950/75 border border-slate-200/80 dark:border-emerald-400/25 text-slate-800 dark:text-emerald-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
-            >
-              {savedBuildMatrices.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.fileName} — {m.projectTitle.slice(0, 38)}
-                </option>
-              ))}
-            </select>
-            {activeBuildMatrix && (
-              <button
-                type="button"
-                onClick={() => removeSavedBuildMatrix(activeBuildMatrix.id)}
-                title="Usuń wybraną matrycę z historii lokalnej"
-                className="min-h-[40px] px-2.5 py-2 rounded-xl text-xs bg-white/80 dark:bg-emerald-950/75 border border-slate-200/80 dark:border-emerald-400/25 text-slate-600 dark:text-emerald-200 hover:text-rose-600 dark:hover:text-rose-300 transition-colors cursor-pointer shrink-0"
+              className="rounded accent-indigo-600 dark:accent-emerald-400"
+            />
+            <span>Zero-Limit (0 błędów 429)</span>
+          </label>
+
+          <button
+            type="button"
+            onClick={() => setLocalhostModalOpen(true)}
+            className="min-h-[40px] px-3.5 py-2 rounded-xl text-xs font-semibold bg-indigo-600 dark:bg-emerald-400 text-white dark:text-emerald-950 hover:opacity-95 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <Server className="w-3.5 h-3.5" />
+            <span>Host Localhost</span>
+          </button>
+
+          {savedBuildMatrices.length > 0 && (
+            <>
+              <select
+                id="saved-file-matrices-select"
+                aria-label="Wcześniejsze pliki"
+                value={activeBuildMatrix?.id || ''}
+                onChange={(e) => {
+                  const chosen = savedBuildMatrices.find(
+                    (m) => m.id === e.target.value
+                  );
+                  if (chosen) selectSavedBuildMatrix(chosen);
+                }}
+                className="min-h-[40px] px-3 py-1.5 rounded-xl text-xs bg-white/85 dark:bg-emerald-950/75 border border-slate-200/80 dark:border-emerald-400/25 text-slate-800 dark:text-emerald-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
               >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-        )}
+                {savedBuildMatrices.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.fileName} — {m.projectTitle.slice(0, 34)}
+                  </option>
+                ))}
+              </select>
+              {activeBuildMatrix && (
+                <button
+                  type="button"
+                  onClick={() => removeSavedBuildMatrix(activeBuildMatrix.id)}
+                  title="Usuń wybraną matrycę z historii lokalnej"
+                  className="min-h-[40px] px-2.5 py-2 rounded-xl text-xs bg-white/80 dark:bg-emerald-950/75 border border-slate-200/80 dark:border-emerald-400/25 text-slate-600 dark:text-emerald-200 hover:text-rose-600 dark:hover:text-rose-300 transition-colors cursor-pointer shrink-0"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </>
+          )}
+        </div>
       </div>
 
       {/* Upload & Configuration Split */}
@@ -714,7 +767,11 @@ export const FileUploadBuildMatrixService: React.FC<{
                   </div>
                   <div className="text-xs text-slate-500 dark:text-emerald-300/80 font-mono tabular-nums mt-0.5">
                     {loadedFile.mimeType} ·{' '}
-                    {Math.max(1, Math.round(loadedFile.fileSize / 1024))} KB · Gotowy do analizy AI
+                    {Math.max(1, Math.round(loadedFile.fileSize / 1024))} KB
+                    {loadedFile.compressedKb
+                      ? ` → skompresowano do ${loadedFile.compressedKb} KB`
+                      : ''}{' '}
+                    · Gotowy do budowy frontendu
                   </div>
                 </div>
 
@@ -955,6 +1012,15 @@ export const FileUploadBuildMatrixService: React.FC<{
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setLocalhostModalOpen(true)}
+                className="min-h-[40px] px-3.5 py-2 rounded-xl text-xs font-semibold bg-indigo-600 dark:bg-emerald-500 text-white dark:text-emerald-950 hover:opacity-95 inline-flex items-center gap-1.5 transition-opacity cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Server className="w-3.5 h-3.5" />
+                <span>Prezentuj na Localhost:4173</span>
+              </button>
+
               <button
                 type="button"
                 onClick={handleExportMarkdownBundle}

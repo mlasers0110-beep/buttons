@@ -31,6 +31,7 @@ import {
   ExternalAppPlugin,
   ExternalPluginDataScope,
   ExternalPluginIntegrationKind,
+  FileBuildTargetType,
   FileUploadPlanRequestPayload,
   FrontendImageRegion,
   GeneratedCompleteElement,
@@ -90,7 +91,11 @@ import {
   parseWorkspaceJsonArchive,
   StandaloneStudioStateBundle,
 } from '../lib/offlineStandaloneExporter';
-import { studioApiFetch } from '../lib/offlineStudioEngines';
+import {
+  getZeroLimitLocalMode,
+  setZeroLimitLocalMode as persistZeroLimitLocalMode,
+  studioApiFetch,
+} from '../lib/offlineStudioEngines';
 import {
   buildComprehensiveGitHubReadme,
   DEFAULT_EXTERNAL_APP_PLUGINS,
@@ -100,10 +105,14 @@ import {
   DEFAULT_LOCAL_DISK_CONFIG,
   getActiveLocalDirectoryHandle,
   pickLocalDiskDirectory,
+  readImageFileToWorkingState,
   writeWorkspaceFilesToLocalDisk,
 } from '../lib/localDiskWorkspace';
 import { slugifyExportName } from '../lib/screenMapExport';
-import { hashStringToShadeId } from '../lib/frontendElementShades';
+import {
+  FRONTEND_ELEMENT_SHADE_ORDER,
+  hashStringToShadeId,
+} from '../lib/frontendElementShades';
 
 const LOCAL_STORAGE_KEY = 'aether_tactile_studio_prefs_v1';
 
@@ -257,6 +266,17 @@ interface StudioContextValue {
     mapProject: AppScreenMapProject;
     buildMatrix: UploadedFileBuildPlan;
   }>;
+  generateFullFrontendFromUploadedFile: (
+    file: File,
+    options?: {
+      projectGoal?: string;
+      targetType?: FileBuildTargetType;
+    }
+  ) => Promise<{
+    mapProject: AppScreenMapProject;
+    buildMatrix: UploadedFileBuildPlan;
+    createdElements: GeneratedCompleteElement[];
+  }>;
   selectSavedBuildMatrix: (matrix: UploadedFileBuildPlan) => void;
   removeSavedBuildMatrix: (id: string) => void;
 
@@ -319,6 +339,10 @@ interface StudioContextValue {
   ) => void;
   gitHubExportModalOpen: boolean;
   setGitHubExportModalOpen: (open: boolean) => void;
+  localhostModalOpen: boolean;
+  setLocalhostModalOpen: (open: boolean) => void;
+  zeroLimitLocalMode: boolean;
+  setZeroLimitLocalMode: (enabled: boolean) => void;
 
   // External Application Plugins & GitHub Repo Description Metadata
   externalPlugins: ExternalAppPlugin[];
@@ -580,6 +604,15 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [gitHubRepoProfile, setGitHubRepoProfile] =
     useState<GitHubRepoProfileMetadata>(DEFAULT_GITHUB_REPO_PROFILE);
   const [pluginsModalOpen, setPluginsModalOpen] = useState<boolean>(false);
+  const [localhostModalOpen, setLocalhostModalOpen] = useState<boolean>(false);
+  const [zeroLimitLocalMode, setZeroLimitLocalModeState] = useState<boolean>(() =>
+    getZeroLimitLocalMode()
+  );
+
+  const setZeroLimitLocalMode = useCallback((enabled: boolean) => {
+    persistZeroLimitLocalMode(enabled);
+    setZeroLimitLocalModeState(enabled);
+  }, []);
 
   const [localDiskConfig, setLocalDiskConfig] =
     useState<LocalDiskWorkspaceConfig>(DEFAULT_LOCAL_DISK_CONFIG);
@@ -2110,6 +2143,306 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     [synth, haptic, patterns, pulseInteraction]
   );
 
+  const generateFullFrontendFromUploadedFile = useCallback(
+    async (
+      file: File,
+      options?: {
+        projectGoal?: string;
+        targetType?: FileBuildTargetType;
+      }
+    ): Promise<{
+      mapProject: AppScreenMapProject;
+      buildMatrix: UploadedFileBuildPlan;
+      createdElements: GeneratedCompleteElement[];
+    }> => {
+      const ext = file.name.split('.').pop()?.toLowerCase() || '';
+      const rawMime = (file.type || '').toLowerCase();
+      const isImage =
+        rawMime.startsWith('image/') ||
+        ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext);
+      const isPdf = rawMime === 'application/pdf' || ext === 'pdf';
+
+      let mimeType = rawMime || 'text/plain';
+      let base64Data: string | undefined;
+      let textContent: string | undefined;
+      let thumbDataUrl: string | undefined;
+      let payloadByteSize = file.size;
+
+      if (isImage) {
+        const imgState = await readImageFileToWorkingState(file);
+        setWorkingFrontendImage(imgState);
+        mimeType = imgState.mimeType;
+        thumbDataUrl = imgState.dataUrl;
+        base64Data = imgState.dataUrl.includes(',')
+          ? imgState.dataUrl.split(',')[1] || ''
+          : imgState.dataUrl;
+        payloadByteSize = Math.max(
+          1024,
+          (imgState.compressedSizeKb || Math.round(file.size / 1024)) * 1024
+        );
+        setAttachedPromptGraphics((prev) => {
+          const filtered = prev.filter((g) => g.name !== imgState.fileName);
+          const nextEntry: PromptReferenceGraphic = {
+            id: `gfx_${Date.now()}`,
+            name: imgState.fileName,
+            mimeType: imgState.mimeType,
+            dataUrl: imgState.dataUrl,
+            role: 'uklad-ekranu',
+            addedAt: new Date().toLocaleTimeString('pl-PL', {
+              hour: '2-digit',
+              minute: '2-digit',
+            }),
+          };
+          return [nextEntry, ...filtered].slice(0, 6);
+        });
+      } else if (isPdf) {
+        mimeType = 'application/pdf';
+        const pdfDataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ''));
+          reader.onerror = () =>
+            reject(new Error('Nie udało się odczytać dokumentu PDF z dysku.'));
+          reader.readAsDataURL(file);
+        });
+        base64Data = pdfDataUrl.includes(',')
+          ? pdfDataUrl.split(',')[1] || ''
+          : pdfDataUrl;
+      } else {
+        if (ext === 'md' || ext === 'markdown') mimeType = 'text/markdown';
+        else if (ext === 'json') mimeType = 'application/json';
+        else if (ext === 'csv') mimeType = 'text/csv';
+        else if (ext === 'html' || ext === 'htm') mimeType = 'text/html';
+        else mimeType = 'text/plain';
+
+        textContent = await file.text();
+      }
+
+      const { mapProject, buildMatrix } = await generatePlanAndMatrixFromFile({
+        fileName: file.name,
+        mimeType,
+        fileSize: payloadByteSize,
+        base64Data,
+        textContent,
+        projectGoal:
+          options?.projectGoal?.trim() ||
+          `Kompletny interaktywny frontend na podstawie pliku ${file.name}`,
+        targetType: options?.targetType || 'website-and-webapp',
+      });
+
+      const entryNode = mapProject.nodes[0];
+      const entryScreenId = entryNode?.id || 'scr-dashboard';
+      setActivePreviewScreenId(entryScreenId);
+
+      const firstWebRow = buildMatrix.websiteMatrix[0];
+      const firstAppRow = buildMatrix.webAppMatrix[0];
+      const nowTime = new Date().toLocaleTimeString('pl-PL', {
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      const tsBase = Date.now();
+
+      const headerEl: GeneratedCompleteElement = {
+        id: `el_${tsBase}_hdr`,
+        name: firstWebRow?.sectionName || `Hero — ${buildMatrix.projectTitle}`,
+        fileName: 'FrontendHeroSection.tsx',
+        targetScreenId: entryScreenId,
+        targetZone: 'header',
+        categoryLabel: 'Sekcja Wiodąca (Hero)',
+        summary: buildMatrix.executiveSummary,
+        headline: buildMatrix.projectTitle,
+        subheadline:
+          entryNode?.summary ||
+          firstWebRow?.conversionGoal ||
+          buildMatrix.executiveSummary,
+        accentHex: '#4F46E5',
+        referenceThumbUrl: thumbDataUrl,
+        controls: [
+          {
+            id: `cta_${tsBase}_1`,
+            kind: 'primary-cta',
+            label:
+              firstWebRow?.keyComponents?.[0] ||
+              `Otwórz moduł: ${entryNode?.title || 'Start'}`,
+          },
+          {
+            id: `met_${tsBase}_1`,
+            kind: 'metric-tile',
+            label: 'Widoki w architekturze',
+            valueText: `${mapProject.nodes.length} ekranów`,
+          },
+          {
+            id: `met_${tsBase}_2`,
+            kind: 'metric-tile',
+            label: 'Sekcje i moduły',
+            valueText: `${buildMatrix.websiteMatrix.length + buildMatrix.webAppMatrix.length}`,
+          },
+        ],
+        reactTailwindCode: `import React from 'react';
+
+export default function FrontendHeroSection() {
+  return (
+    <section className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-4">
+      <div className="text-xs text-slate-500 font-mono">${entryNode?.route || '/'}</div>
+      <h1 className="text-2xl font-bold tracking-tight">${buildMatrix.projectTitle.replace(/"/g, '')}</h1>
+      <p className="text-sm text-slate-600 dark:text-slate-300">${(entryNode?.summary || buildMatrix.executiveSummary).replace(/"/g, '')}</p>
+      <button type="button" className="px-4 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-semibold">
+        Rozpocznij pracę
+      </button>
+    </section>
+  );
+}`,
+        compiledPromptUsed: buildMatrix.masterBuildPrompt,
+        createdAt: nowTime,
+      };
+
+      const mainEl: GeneratedCompleteElement = {
+        id: `el_${tsBase}_main`,
+        name: firstAppRow?.moduleName || `Kokpit Operacyjny — ${entryNode?.title || 'Główny'}`,
+        fileName: 'FrontendWorkspaceModule.tsx',
+        targetScreenId: entryScreenId,
+        targetZone: 'main',
+        categoryLabel: 'Moduł Interaktywny Aplikacji',
+        summary:
+          firstAppRow?.stateAndDataFlow ||
+          'Główna przestrzeń robocza wygenerowana z wgranego pliku.',
+        headline:
+          firstAppRow?.moduleName ||
+          `Moduł Główny: ${entryNode?.title || buildMatrix.projectTitle}`,
+        subheadline:
+          firstAppRow?.acceptanceCriteria ||
+          firstWebRow?.visualAndTactileSpec ||
+          'Sterowanie parametrami w czasie rzeczywistym z synchronizacją odcieni.',
+        accentHex: '#0EA5E9',
+        controls: [
+          {
+            id: `sld_${tsBase}_1`,
+            kind: 'slider',
+            label: firstAppRow?.uiComponents?.[0] || 'Intensywność widoku i filtracji',
+          },
+          {
+            id: `tgl_${tsBase}_1`,
+            kind: 'toggle',
+            label: firstAppRow?.uiComponents?.[1] || 'Synchronizacja danych na żywo',
+          },
+          {
+            id: `met_${tsBase}_3`,
+            kind: 'metric-tile',
+            label: 'Rola użytkownika',
+            valueText: firstAppRow?.userRole || entryNode?.role || 'Operator',
+          },
+          {
+            id: `cta_${tsBase}_2`,
+            kind: 'primary-cta',
+            label: `Zatwierdź i przejdź dalej (${mapProject.nodes[1]?.title || 'Kolejny widok'})`,
+          },
+        ],
+        reactTailwindCode: `import React, { useState } from 'react';
+
+export default function FrontendWorkspaceModule() {
+  const [level, setLevel] = useState(72);
+  const [liveSync, setLiveSync] = useState(true);
+
+  return (
+    <section className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-4">
+      <h2 className="text-lg font-semibold">${(firstAppRow?.moduleName || entryNode?.title || 'Moduł Główny').replace(/"/g, '')}</h2>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <label className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 block space-y-1.5 text-xs">
+          <div className="flex justify-between"><span>Poziom parametru</span><span className="font-mono">{level}%</span></div>
+          <input type="range" min={0} max={100} value={level} onChange={(e) => setLevel(Number(e.target.value))} className="w-full" />
+        </label>
+        <button type="button" onClick={() => setLiveSync(!liveSync)} className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs font-medium">
+          <span>Synchronizacja</span>
+          <span className="font-mono">{liveSync ? 'Aktywna' : 'Wstrzymana'}</span>
+        </button>
+      </div>
+    </section>
+  );
+}`,
+        compiledPromptUsed: buildMatrix.masterBuildPrompt,
+        createdAt: nowTime,
+      };
+
+      const footerEl: GeneratedCompleteElement = {
+        id: `el_${tsBase}_ftr`,
+        name:
+          buildMatrix.websiteMatrix[1]?.sectionName ||
+          'Pasek Nawigacji i Szybkiego Eksportu',
+        fileName: 'FrontendActionFooter.tsx',
+        targetScreenId: entryScreenId,
+        targetZone: 'footer',
+        categoryLabel: 'Dolna Strefa Konwersji',
+        summary: 'Szybkie przejścia między ekranami i akcje podsumowujące.',
+        headline:
+          buildMatrix.websiteMatrix[1]?.sectionName ||
+          'Szybkie Przejścia i Podsumowanie Ścieżki',
+        subheadline:
+          buildMatrix.websiteMatrix[1]?.conversionGoal ||
+          `Gotowe połączenia nawigacyjne dla ${mapProject.edges.length} przepływów w aplikacji.`,
+        accentHex: '#10B981',
+        controls: [
+          {
+            id: `tgl_${tsBase}_2`,
+            kind: 'toggle',
+            label: 'Walidacja formularzy i stanów',
+          },
+          {
+            id: `met_${tsBase}_4`,
+            kind: 'metric-tile',
+            label: 'Przepływy DAG',
+            valueText: `${mapProject.edges.length} połączeń`,
+          },
+        ],
+        reactTailwindCode: `import React from 'react';
+
+export default function FrontendActionFooter() {
+  return (
+    <footer className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs">
+      <span>Gotowy przepływ wieloekranowy</span>
+      <span className="font-mono">${mapProject.nodes.length} widoków · ${mapProject.edges.length} krawędzi</span>
+    </footer>
+  );
+}`,
+        compiledPromptUsed: buildMatrix.masterBuildPrompt,
+        createdAt: nowTime,
+      };
+
+      const createdElements = [headerEl, mainEl, footerEl];
+
+      setGeneratedElements((prev) => [
+        ...createdElements,
+        ...prev.filter((e) => e.targetScreenId !== entryScreenId),
+      ]);
+
+      const shadeHdr = FRONTEND_ELEMENT_SHADE_ORDER[0];
+      const shadeMain = FRONTEND_ELEMENT_SHADE_ORDER[1];
+      const shadeFtr = FRONTEND_ELEMENT_SHADE_ORDER[2];
+
+      setComposedElementShades((prev) => ({
+        ...prev,
+        [headerEl.id]: shadeHdr,
+        [mainEl.id]: shadeMain,
+        [footerEl.id]: shadeFtr,
+      }));
+
+      setActiveModifiedElement({
+        id: mainEl.id,
+        kind: 'generated',
+        label: mainEl.name,
+        zone: 'main',
+        screenId: entryScreenId,
+        shadeId: shadeMain,
+        sourceSurface: `Wygenerowano kompletny frontend z pliku ${file.name}`,
+        updatedAtMs: Date.now(),
+      });
+
+      hapticAudio.triggerPress(synth, haptic, patterns, { pitchSemitones: 6 });
+      pulseInteraction(1.35);
+
+      return { mapProject, buildMatrix, createdElements };
+    },
+    [generatePlanAndMatrixFromFile, synth, haptic, patterns, pulseInteraction]
+  );
+
   const selectSavedBuildMatrix = useCallback(
     (matrix: UploadedFileBuildPlan) => {
       setActiveBuildMatrix(matrix);
@@ -3119,6 +3452,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     activeBuildMatrix,
     savedBuildMatrices,
     generatePlanAndMatrixFromFile,
+    generateFullFrontendFromUploadedFile,
     selectSavedBuildMatrix,
     removeSavedBuildMatrix,
     pendingImageGeneratorDraft,
@@ -3151,6 +3485,10 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     moveGeneratedElementTarget,
     gitHubExportModalOpen,
     setGitHubExportModalOpen,
+    localhostModalOpen,
+    setLocalhostModalOpen,
+    zeroLimitLocalMode,
+    setZeroLimitLocalMode,
     externalPlugins,
     toggleExternalPlugin,
     addCustomExternalPlugin,

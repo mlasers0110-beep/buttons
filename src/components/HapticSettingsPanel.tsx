@@ -28,6 +28,7 @@ import { TactileButton } from './ui/TactileButton';
 import { EngravingGlyph } from './ui/EngravingGlyph';
 import { RotaryDriverCalibrationService } from './RotaryDriverCalibrationService';
 import { HapticOscilloscopePanel } from './HapticOscilloscopePanel';
+import { MinimalistLowClicksLibrary } from './MinimalistLowClicksLibrary';
 
 export const HapticSettingsPanel: React.FC = () => {
   const {
@@ -166,6 +167,9 @@ export const HapticSettingsPanel: React.FC = () => {
     <div className="space-y-8">
       {/* Real-Time Haptic Oscilloscope (Frequency & Amplitude Waveform per Material: Glass, Metal, Plastic, Suede) */}
       <HapticOscilloscopePanel />
+
+      {/* Curated Minimalist Short Low-Frequency Clicks Library (<160 Hz, 4–14 ms) */}
+      <MinimalistLowClicksLibrary />
 
       {/* Dedicated Rotary Controller Click & Haptic Calibration Service */}
       <RotaryDriverCalibrationService />

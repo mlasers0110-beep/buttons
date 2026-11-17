@@ -4,6 +4,7 @@ import { SwitchVariantsLibrary } from './SwitchVariantsLibrary';
 import { RotaryDriverCalibrationService } from './RotaryDriverCalibrationService';
 import { ScreenTransitionsLibrary } from './ScreenTransitionsLibrary';
 import { ScreenPrototypeDropStage } from './ScreenPrototypeDropStage';
+import { MinimalistLowClicksLibrary } from './MinimalistLowClicksLibrary';
 import { useStudio } from '../context/StudioContext';
 import { StudioLiveTabId } from '../types/studio';
 
@@ -14,10 +15,11 @@ export const TactileComponentsHub: React.FC<{
   const { palette } = useStudio();
   const [focusView, setFocusView] = useState<
     | 'both'
+    | 'minimal-clicks'
+    | 'animations'
     | 'prototyper'
     | 'transitions'
     | 'calibration'
-    | 'animations'
     | 'switches'
   >('both');
   const isDark = palette === 'emerald-clinic';
@@ -30,11 +32,11 @@ export const TactileComponentsHub: React.FC<{
             <span>Katalog Interaktywny Aether</span>
             <span aria-hidden="true">·</span>
             <span>
-              Drag &amp; Drop na Ekran · Przejścia Ekranów · Kalibracja CNC · Animacje · Przełączniki
+              Minimalistyczne Kliknięcia &lt;160 Hz · Podświetlenia Optyczne · Drag &amp; Drop · Kalibracja CNC
             </span>
           </div>
           <h1 className="text-2xl sm:text-4xl font-semibold text-slate-900 dark:text-emerald-50 mt-1">
-            Biblioteka Komponentów, Przejść Ekranowych i Prototypowania
+            Biblioteka Komponentów, Niskich Kliknięć i Podświetleń
           </h1>
         </div>
 
@@ -42,10 +44,11 @@ export const TactileComponentsHub: React.FC<{
           {(
             [
               ['both', 'Pełna biblioteka'],
+              ['minimal-clicks', 'Niskie kliknięcia (8)'],
+              ['animations', 'Podświetlenia i ruch'],
               ['prototyper', 'Przeciągnij na ekran'],
               ['transitions', 'Przejścia ekranów'],
               ['calibration', 'Kalibracja sterownika'],
-              ['animations', 'Animacje przycisków'],
               ['switches', 'Warianty przełączników'],
             ] as const
           ).map(([id, label]) => (
@@ -67,6 +70,12 @@ export const TactileComponentsHub: React.FC<{
         </div>
       </div>
 
+      {(focusView === 'both' || focusView === 'minimal-clicks') && (
+        <MinimalistLowClicksLibrary />
+      )}
+
+      {(focusView === 'both' || focusView === 'animations') && <ButtonAnimationsLibrary />}
+
       {(focusView === 'both' || focusView === 'prototyper') && (
         <ScreenPrototypeDropStage
           mode="docked-preview"
@@ -81,8 +90,8 @@ export const TactileComponentsHub: React.FC<{
       {(focusView === 'both' || focusView === 'calibration') && (
         <RotaryDriverCalibrationService />
       )}
-      {(focusView === 'both' || focusView === 'animations') && <ButtonAnimationsLibrary />}
       {(focusView === 'both' || focusView === 'switches') && <SwitchVariantsLibrary />}
     </div>
   );
 };
+

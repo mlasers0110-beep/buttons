@@ -223,22 +223,22 @@ export const TactileButton: React.FC<TactileButtonProps> = ({
       : 'rgba(88, 76, 148, 0.15)';
 
   const specularAlpha =
-    (depth.specularRim / 100) * (effectiveMaterial === 'suede' ? 0.25 : 0.85);
-  const glowFactor = engraving.glowEnabled ? engraving.glowIntensity / 100 : 0.25;
+    (depth.specularRim / 100) * (effectiveMaterial === 'suede' ? 0.32 : 0.92);
+  const glowFactor = engraving.glowEnabled ? Math.max(0.35, engraving.glowIntensity / 100) : 0.32;
 
   const boxShadowStyle = isPressed
-    ? `inset 0 3px 10px ${shadowColor}, 0 0 ${Math.round(
-        animation.glowSpread * (0.55 + holdIntensity)
-      )}px ${effectiveGlowColor}66`
-    : selected || effectiveIlluminationId === 'subsurface-caustic'
-      ? `0 ${Math.round(depth.elevation * 0.65)}px ${Math.round(
+    ? `inset 0 2px 9px ${shadowColor}, inset 0 1px 0 rgba(255,255,255,${(specularAlpha * 0.65).toFixed(2)}), 0 0 ${Math.round(
+        animation.glowSpread * (0.75 + holdIntensity * 0.9)
+      )}px ${effectiveGlowColor}88, 0 0 12px ${effectiveGlowColor}55`
+    : selected || isHovered || effectiveIlluminationId === 'subsurface-caustic'
+      ? `0 ${Math.round(depth.elevation * 0.62)}px ${Math.round(
           depth.blur * 0.78
         )}px ${shadowColor}, 0 0 ${Math.round(
-          glowFactor * (effectiveIlluminationId === 'subsurface-caustic' ? 32 : 22)
-        )}px ${effectiveGlowColor}42, inset 0 1px 1px rgba(255,255,255,${specularAlpha})`
-      : `0 ${Math.round(depth.elevation * 0.55)}px ${Math.round(
-          depth.blur * 0.7
-        )}px ${shadowColor}, inset 0 1px 1px rgba(255,255,255,${specularAlpha})`;
+          glowFactor * (effectiveIlluminationId === 'subsurface-caustic' ? 38 : isHovered ? 28 : 22)
+        )}px ${effectiveGlowColor}${isHovered ? '58' : '44'}, inset 0 1px 1.5px rgba(255,255,255,${specularAlpha.toFixed(2)}), inset 0 -1px 6px ${effectiveGlowColor}26`
+      : `0 ${Math.round(depth.elevation * 0.52)}px ${Math.round(
+          depth.blur * 0.68
+        )}px ${shadowColor}, inset 0 1px 1.5px rgba(255,255,255,${specularAlpha.toFixed(2)})`;
 
   // Compute compositor-only motion targets per preset
   const holdTremorX =
@@ -342,85 +342,115 @@ export const TactileButton: React.FC<TactileButtonProps> = ({
       className={`relative overflow-hidden select-none cursor-pointer transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 disabled:opacity-50 ${getMaterialClasses()} ${
         selected
           ? isDark
-            ? 'ring-1 ring-emerald-300/70'
-            : 'ring-1 ring-indigo-500/60'
+            ? 'ring-1.5 ring-emerald-300/85'
+            : 'ring-1.5 ring-indigo-500/75'
           : ''
       } ${className}`}
     >
-      {/* Illumination Layer 1: Cursor Radial Spotlight */}
+      {/* Illumination Layer 1: Dual-Zone Cursor Radial Spotlight + Tracking Top Fresnel Rim */}
       {effectiveIlluminationId === 'cursor-spotlight' && (
-        <span
-          aria-hidden="true"
-          style={{
-            opacity: isPressed ? 0.95 : isHovered ? 0.82 : 0.22,
-            background: `radial-gradient(170px circle at ${pointerCoords.spotX}% ${pointerCoords.spotY}%, ${effectiveGlowColor}52, transparent 72%)`,
-          }}
-          className="pointer-events-none absolute inset-0 transition-opacity duration-150"
-        />
-      )}
-
-      {/* Illumination Layer 2: Conic Fiber-Optic Border Beam */}
-      {effectiveIlluminationId === 'conic-border-beam' && (
-        <span
-          aria-hidden="true"
-          style={{
-            padding: '1.5px',
-            borderRadius: `${dynamicRadius}px`,
-            WebkitMask:
-              'linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)',
-            WebkitMaskComposite: 'xor',
-            maskComposite: 'exclude',
-            opacity: isPressed ? 1 : isHovered ? 0.95 : 0.65,
-          }}
-          className="pointer-events-none absolute inset-0 overflow-hidden transition-opacity duration-150"
-        >
+        <>
           <span
+            aria-hidden="true"
             style={{
-              background: `conic-gradient(from 0deg, transparent 68%, ${effectiveGlowColor} 92%, #ffffff 100%)`,
+              opacity: isPressed ? 1 : isHovered ? 0.92 : 0.34,
+              background: `radial-gradient(96px circle at ${pointerCoords.spotX}% ${pointerCoords.spotY}%, rgba(255,255,255,${isDark ? '0.28' : '0.52'}) 0%, ${effectiveGlowColor}68 38%, transparent 74%), radial-gradient(220px circle at ${pointerCoords.spotX}% ${pointerCoords.spotY}%, ${effectiveGlowColor}36 0%, transparent 78%)`,
             }}
-            className="absolute left-1/2 top-1/2 w-[240%] aspect-square animate-border-beam"
+            className="pointer-events-none absolute inset-0 transition-opacity duration-150"
           />
-        </span>
+          <span
+            aria-hidden="true"
+            style={{
+              opacity: isPressed || isHovered ? 0.95 : 0.45,
+              background: `radial-gradient(120px 3px at ${pointerCoords.spotX}% 0%, #ffffff 0%, ${effectiveGlowColor} 55%, transparent 100%)`,
+            }}
+            className="pointer-events-none absolute top-0 inset-x-2 h-[2px] transition-opacity duration-150"
+          />
+        </>
       )}
 
-      {/* Illumination Layer 3: Prism Specular Sweep */}
+      {/* Illumination Layer 2: Crisp 2px Conic Fiber-Optic Border Waveguide + Soft Inner Halo */}
+      {effectiveIlluminationId === 'conic-border-beam' && (
+        <>
+          <span
+            aria-hidden="true"
+            style={{
+              padding: '2px',
+              borderRadius: `${dynamicRadius}px`,
+              WebkitMask:
+                'linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)',
+              WebkitMaskComposite: 'xor',
+              maskComposite: 'exclude',
+              opacity: isPressed ? 1 : isHovered ? 0.98 : 0.78,
+            }}
+            className="pointer-events-none absolute inset-0 overflow-hidden transition-opacity duration-150"
+          >
+            <span
+              style={{
+                background: `conic-gradient(from 0deg, transparent 56%, ${effectiveGlowColor}55 76%, ${effectiveGlowColor} 91%, #ffffff 98%, transparent 100%)`,
+              }}
+              className="absolute left-1/2 top-1/2 w-[250%] aspect-square animate-border-beam"
+            />
+          </span>
+          <span
+            aria-hidden="true"
+            style={{
+              opacity: isPressed ? 0.55 : isHovered ? 0.38 : 0.18,
+              background: `radial-gradient(80% 90% at ${pointerCoords.spotX}% ${pointerCoords.spotY}%, ${effectiveGlowColor}48 0%, transparent 72%)`,
+            }}
+            className="pointer-events-none absolute inset-0 transition-opacity duration-150"
+          />
+        </>
+      )}
+
+      {/* Illumination Layer 3: Chromatic Prism Specular Sweep */}
       {effectiveIlluminationId === 'prism-refraction-sweep' && (
-        <span
-          aria-hidden="true"
-          style={{
-            opacity: isPressed || isHovered ? 0.95 : 0.45,
-            background: `linear-gradient(110deg, transparent 22%, ${effectiveGlowColor}38 44%, rgba(255,255,255,0.68) 50%, ${effectiveGlowColor}30 56%, transparent 78%)`,
-          }}
-          className="pointer-events-none absolute inset-y-0 -left-1/4 w-3/5 animate-prism-sweep"
-        />
+        <>
+          <span
+            aria-hidden="true"
+            style={{
+              opacity: isPressed || isHovered ? 0.98 : 0.58,
+              background: `linear-gradient(108deg, transparent 18%, ${effectiveGlowColor}42 39%, rgba(255,255,255,0.86) 50%, #38bdf844 58%, transparent 80%)`,
+            }}
+            className="pointer-events-none absolute inset-y-0 -left-1/4 w-2/3 animate-prism-sweep"
+          />
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute top-0 left-4 right-4 h-[1.5px] aether-fresnel-top opacity-75"
+          />
+        </>
       )}
 
-      {/* Illumination Layer 4: Subsurface Caustic Cloud */}
+      {/* Illumination Layer 4: Subsurface Volumetric Caustic Cloud */}
       {effectiveIlluminationId === 'subsurface-caustic' && (
         <span
           aria-hidden="true"
           style={{
-            opacity: Math.min(1, 0.42 + (isHovered ? 0.25 : 0) + (isPressed ? 0.35 : 0) + holdIntensity * 0.4),
-            background: `radial-gradient(85% 95% at 50% 110%, ${effectiveGlowColor}68 0%, ${effectiveGlowColor}22 52%, transparent 82%)`,
+            opacity: Math.min(
+              1,
+              0.52 + (isHovered ? 0.24 : 0) + (isPressed ? 0.28 : 0) + holdIntensity * 0.35
+            ),
+            background: `radial-gradient(92% 105% at ${pointerCoords.spotX}% 108%, ${effectiveGlowColor}82 0%, ${effectiveGlowColor}34 48%, transparent 82%), radial-gradient(60% 45% at 50% 0%, rgba(255,255,255,0.38) 0%, transparent 75%)`,
           }}
           className="pointer-events-none absolute inset-0 transition-opacity duration-150"
         />
       )}
 
-      {/* Illumination Layer 5: Dual Horizon Fresnel Rim */}
+      {/* Illumination Layer 5: Dual Horizon Fresnel Specular Rim */}
       {effectiveIlluminationId === 'horizon-dual-rim' && (
         <>
           <span
             aria-hidden="true"
-            className="pointer-events-none absolute top-0 left-4 right-4 h-[1.5px] bg-gradient-to-r from-transparent via-white/90 to-transparent opacity-90"
+            className="pointer-events-none absolute top-0 left-3 right-3 h-[2px] bg-gradient-to-r from-transparent via-white to-transparent opacity-95"
           />
           <span
             aria-hidden="true"
             style={{
-              opacity: isPressed ? 1 : isHovered ? 0.88 : 0.55,
-              background: `linear-gradient(90deg, transparent 8%, ${effectiveGlowColor} 50%, transparent 92%)`,
+              opacity: isPressed ? 1 : isHovered ? 0.94 : 0.68,
+              background: `linear-gradient(90deg, transparent 6%, ${effectiveGlowColor} 50%, transparent 94%)`,
+              boxShadow: `0 -2px 12px ${effectiveGlowColor}`,
             }}
-            className="pointer-events-none absolute bottom-0 left-3 right-3 h-[2px] transition-opacity duration-150"
+            className="pointer-events-none absolute bottom-0 left-2 right-2 h-[2.5px] transition-opacity duration-150"
           />
         </>
       )}
@@ -430,20 +460,22 @@ export const TactileButton: React.FC<TactileButtonProps> = ({
         <span
           aria-hidden="true"
           style={{
-            background: `radial-gradient(65% 80% at 50% 50%, ${effectiveGlowColor}46 0%, transparent 76%)`,
+            background: `radial-gradient(72% 86% at 50% 50%, ${effectiveGlowColor}5c 0%, ${effectiveGlowColor}1e 52%, transparent 78%)`,
           }}
           className="pointer-events-none absolute inset-0 animate-etch-breathe"
         />
       )}
 
-      {/* Group Unification Indicator Bar (subtle top hairline) */}
+      {/* Group Unification Indicator Bar (crisp top optical waveguide) */}
       {isGroupUnified &&
         variant !== 'neumorphic-icon' &&
         effectiveIlluminationId !== 'horizon-dual-rim' && (
           <span
             aria-hidden="true"
-            style={{ backgroundColor: effectiveGlowColor }}
-            className="pointer-events-none absolute top-0 left-6 right-6 h-[1.5px] opacity-55"
+            style={{
+              background: `linear-gradient(90deg, transparent 0%, ${effectiveGlowColor} 50%, transparent 100%)`,
+            }}
+            className="pointer-events-none absolute top-0 left-5 right-5 h-[1.5px] opacity-75"
           />
         )}
 

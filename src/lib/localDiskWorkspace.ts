@@ -327,34 +327,127 @@ export function buildDefaultFrontendRegions(): FrontendImageRegion[] {
   ];
 }
 
+export async function compressImageDataUrlForApi(
+  rawDataUrl: string,
+  maxEdgePx = 1280,
+  quality = 0.82
+): Promise<{
+  dataUrl: string;
+  mimeType: string;
+  widthPx: number;
+  heightPx: number;
+  compressedSizeKb: number;
+}> {
+  const estimateKb = (url: string) =>
+    Math.max(1, Math.round(((url.length - url.indexOf(',') - 1) * 0.75) / 1024));
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const natW = img.naturalWidth || 1440;
+      const natH = img.naturalHeight || 900;
+      const longest = Math.max(natW, natH);
+      const rawKb = estimateKb(rawDataUrl);
+
+      // Keep small images untouched if already compact and within 1280px
+      if (longest <= maxEdgePx && rawKb <= 190) {
+        const mimeMatch = rawDataUrl.match(/^data:([^;]+);/);
+        resolve({
+          dataUrl: rawDataUrl,
+          mimeType: mimeMatch ? mimeMatch[1] : 'image/png',
+          widthPx: natW,
+          heightPx: natH,
+          compressedSizeKb: rawKb,
+        });
+        return;
+      }
+
+      const scale = longest > maxEdgePx ? maxEdgePx / longest : 1;
+      const outW = Math.max(64, Math.round(natW * scale));
+      const outH = Math.max(64, Math.round(natH * scale));
+
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = outW;
+        canvas.height = outH;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve({
+            dataUrl: rawDataUrl,
+            mimeType: 'image/png',
+            widthPx: natW,
+            heightPx: natH,
+            compressedSizeKb: rawKb,
+          });
+          return;
+        }
+
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+
+        // Try WebP first (preserves alpha & achieves ~70% smaller base64), fallback to crisp JPEG
+        ctx.drawImage(img, 0, 0, outW, outH);
+        let compressed = canvas.toDataURL('image/webp', quality);
+        let outMime = 'image/webp';
+        if (!compressed.startsWith('data:image/webp')) {
+          ctx.fillStyle = '#F8FAFC';
+          ctx.fillRect(0, 0, outW, outH);
+          ctx.drawImage(img, 0, 0, outW, outH);
+          compressed = canvas.toDataURL('image/jpeg', quality);
+          outMime = 'image/jpeg';
+        }
+
+        resolve({
+          dataUrl: compressed,
+          mimeType: outMime,
+          widthPx: outW,
+          heightPx: outH,
+          compressedSizeKb: estimateKb(compressed),
+        });
+      } catch {
+        resolve({
+          dataUrl: rawDataUrl,
+          mimeType: 'image/png',
+          widthPx: natW,
+          heightPx: natH,
+          compressedSizeKb: rawKb,
+        });
+      }
+    };
+    img.onerror = () =>
+      resolve({
+        dataUrl: rawDataUrl,
+        mimeType: 'image/png',
+        widthPx: 1440,
+        heightPx: 900,
+        compressedSizeKb: estimateKb(rawDataUrl),
+      });
+    img.src = rawDataUrl;
+  });
+}
+
 export async function readImageFileToWorkingState(
   file: File
 ): Promise<WorkingFrontendImageState> {
-  const dataUrl = await new Promise<string>((resolve, reject) => {
+  const rawDataUrl = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result || ''));
     reader.onerror = () => reject(new Error('Nie udało się odczytać pliku obrazu.'));
     reader.readAsDataURL(file);
   });
 
-  const dims = await new Promise<{ w: number; h: number }>((resolve) => {
-    const img = new Image();
-    img.onload = () =>
-      resolve({
-        w: img.naturalWidth || 1440,
-        h: img.naturalHeight || 900,
-      });
-    img.onerror = () => resolve({ w: 1440, h: 900 });
-    img.src = dataUrl;
-  });
+  const originalSizeKb = Math.max(1, Math.round(file.size / 1024));
+  const optimized = await compressImageDataUrlForApi(rawDataUrl, 1280, 0.82);
 
   return {
     id: `fimg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     fileName: file.name || 'projektowany-frontend.png',
-    mimeType: file.type || 'image/png',
-    dataUrl,
-    widthPx: dims.w,
-    heightPx: dims.h,
+    mimeType: optimized.mimeType || file.type || 'image/jpeg',
+    dataUrl: optimized.dataUrl,
+    widthPx: optimized.widthPx,
+    heightPx: optimized.heightPx,
+    originalSizeKb,
+    compressedSizeKb: optimized.compressedSizeKb,
     uploadedAt: new Date().toLocaleTimeString('pl-PL', {
       hour: '2-digit',
       minute: '2-digit',
@@ -392,4 +485,82 @@ export async function createWorkingStateFromAssetUrl(params: {
     }),
     regions: buildDefaultFrontendRegions(),
   };
+}
+
+export async function writeArbitraryFilesToLocalDisk(params: {
+  subFolderName: string;
+  files: Array<{ path: string; content: string; encoding?: 'utf-8' | 'base64' }>;
+}): Promise<{
+  ok: boolean;
+  filesWritten: number;
+  targetDirectoryLabel: string;
+  errorMessage?: string;
+}> {
+  if (!activeDirectoryHandle) {
+    return {
+      ok: false,
+      filesWritten: 0,
+      targetDirectoryLabel: '',
+      errorMessage:
+        'Brak podłączonego folderu bezpośredniego na dysku (użyj pobrania paczki .zip lub wskaż katalog na Stronie Startowej).',
+    };
+  }
+
+  try {
+    let rootDir = activeDirectoryHandle;
+    const cleanRootSub = params.subFolderName.trim();
+    if (cleanRootSub) {
+      rootDir = await activeDirectoryHandle.getDirectoryHandle(cleanRootSub, {
+        create: true,
+      });
+    }
+
+    let written = 0;
+    for (const entry of params.files) {
+      const segments = entry.path
+        .replace(/^\/+/, '')
+        .split('/')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (segments.length === 0) continue;
+
+      let currDir = rootDir;
+      for (let i = 0; i < segments.length - 1; i++) {
+        currDir = await currDir.getDirectoryHandle(segments[i], { create: true });
+      }
+      const fileName = segments[segments.length - 1];
+      const fileHandle = await currDir.getFileHandle(fileName, { create: true });
+      const stream = await fileHandle.createWritable();
+
+      if (entry.encoding === 'base64') {
+        const binary = atob(entry.content);
+        const buf = new ArrayBuffer(binary.length);
+        const bytes = new Uint8Array(buf);
+        for (let b = 0; b < binary.length; b++) {
+          bytes[b] = binary.charCodeAt(b);
+        }
+        await stream.write(bytes);
+      } else {
+        await stream.write(entry.content);
+      }
+      await stream.close();
+      written++;
+    }
+
+    return {
+      ok: true,
+      filesWritten: written,
+      targetDirectoryLabel: cleanRootSub
+        ? `${activeDirectoryHandle.name}/${cleanRootSub}`
+        : activeDirectoryHandle.name,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      filesWritten: 0,
+      targetDirectoryLabel: activeDirectoryHandle.name,
+      errorMessage: `Nie udało się zapisać plików serwera Localhost bezpośrednio do katalogu (${msg}). Pobierz gotowe archiwum .zip obok.`,
+    };
+  }
 }

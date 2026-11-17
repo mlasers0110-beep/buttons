@@ -279,11 +279,74 @@ export const TACTILE_UI_CATALOG: TactileUiCatalogItem[] = [
     recommendedMaterial: 'frosted-glass',
     jsxSnippet: '<SegmentedTouchStrip levels={["Cichy","Miękki","Studyjny","Szczytowy"]} />',
   },
+
+  // --- 5. Krótkie Niskie Minimalistyczne Kliknięcia (<160 Hz, 4–14 ms) ---
+  {
+    id: 'click-sub-carbon-6ms',
+    componentName: 'MinimalCarbonClickButton',
+    labelPl: 'Przycisk Minimal: Karbon 58 Hz (6 ms)',
+    defaultWidgetLabel: 'Zatwierdź (58 Hz)',
+    category: 'minimal-clicks',
+    sourceModulePl: 'Minimalistyczne kliknięcia',
+    descriptionPl:
+      'Krótki, suchy mikro-styk 58 Hz wygaszany w 6 ms bez wysokich transjentów.',
+    defaultZone: 'footer',
+    defaultSpanCols: 1,
+    isButtonLike: true,
+    recommendedMaterial: 'matte-metal',
+    jsxSnippet: '<MinimalClickButton clickVariant="sub-carbon-6ms">Zatwierdź</MinimalClickButton>',
+  },
+  {
+    id: 'click-quartz-detent-8ms',
+    componentName: 'MinimalQuartzDetentButton',
+    labelPl: 'Przycisk Minimal: Kwarc 82 Hz (8 ms)',
+    defaultWidgetLabel: 'Dalej (82 Hz)',
+    category: 'minimal-clicks',
+    sourceModulePl: 'Minimalistyczne kliknięcia',
+    descriptionPl:
+      'Punktowy impuls soczewki kwarcowej 82 Hz (8 ms) z czystym wygaszeniem w przejściu przez zero.',
+    defaultZone: 'main',
+    defaultSpanCols: 1,
+    isButtonLike: true,
+    recommendedMaterial: 'shiny-glass',
+    jsxSnippet: '<MinimalClickButton clickVariant="quartz-detent-8ms">Dalej</MinimalClickButton>',
+  },
+  {
+    id: 'click-monolith-thud-12ms',
+    componentName: 'MinimalMonolithSubButton',
+    labelPl: 'Przycisk Minimal: Monolit 46 Hz (12 ms)',
+    defaultWidgetLabel: 'Aktywuj (46 Hz)',
+    category: 'minimal-clicks',
+    sourceModulePl: 'Minimalistyczne kliknięcia',
+    descriptionPl:
+      'Głęboki, aksamitny impuls sub-basowy 46 Hz (12 ms) o zerowym szumie mechanicznym.',
+    defaultZone: 'main',
+    defaultSpanCols: 1,
+    isButtonLike: true,
+    recommendedMaterial: 'suede',
+    jsxSnippet: '<MinimalClickButton clickVariant="monolith-thud-12ms">Aktywuj</MinimalClickButton>',
+  },
+  {
+    id: 'click-satin-tick-4ms',
+    componentName: 'MinimalSatinTickNav',
+    labelPl: 'Klawisz Minimal: Satyna 112 Hz (4 ms)',
+    defaultWidgetLabel: 'Przełącz widok',
+    category: 'minimal-clicks',
+    sourceModulePl: 'Minimalistyczne kliknięcia',
+    descriptionPl:
+      'Ultrakrótki 4-milisekundowy mikro-tik 112 Hz do gęstej nawigacji i pasków narzędzi.',
+    defaultZone: 'header',
+    defaultSpanCols: 1,
+    isButtonLike: true,
+    recommendedMaterial: 'abs-plastic',
+    jsxSnippet: '<MinimalClickButton clickVariant="satin-tick-4ms">Przełącz</MinimalClickButton>',
+  },
 ];
 
 export const TACTILE_CATEGORY_LABELS: Record<'all' | TactileWidgetCategory, string> = {
-  all: 'Wszystkie (16)',
+  all: 'Wszystkie (20)',
   buttons: 'Przyciski (5)',
+  'minimal-clicks': 'Niskie Kliknięcia (4)',
   sliders: 'Suwaki (4)',
   levers: 'Dźwignie (3)',
   'touch-rotary': 'Dotyk i CNC (4)',
@@ -387,6 +450,21 @@ export function findCatalogItemForIlluminationPreset(
   return {
     ...base,
     defaultWidgetLabel: illumName.split(' (')[0],
+  };
+}
+
+export function findCatalogItemForMinimalistClick(
+  variantId: string,
+  shortLabelPl: string
+): TactileUiCatalogItem {
+  if (variantId === 'sub-carbon-6ms') return findCatalogItemById('click-sub-carbon-6ms')!;
+  if (variantId === 'quartz-detent-8ms') return findCatalogItemById('click-quartz-detent-8ms')!;
+  if (variantId === 'monolith-thud-12ms') return findCatalogItemById('click-monolith-thud-12ms')!;
+  if (variantId === 'satin-tick-4ms') return findCatalogItemById('click-satin-tick-4ms')!;
+  const base = findCatalogItemById('click-sub-carbon-6ms')!;
+  return {
+    ...base,
+    defaultWidgetLabel: shortLabelPl,
   };
 }
 

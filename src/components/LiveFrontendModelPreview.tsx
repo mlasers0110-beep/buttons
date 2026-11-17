@@ -10,6 +10,7 @@ import {
   Layers,
   Monitor,
   Palette,
+  Server,
   Smartphone,
   Tablet,
   Trash2,
@@ -80,16 +81,28 @@ const GeneratedElementLiveCard: React.FC<{
   return (
     <div
       onClick={onSelectModify}
-      style={{
-        backgroundColor: isDark ? shade.surfaceBgDark : shade.surfaceBgLight,
-        borderColor: isCurrentlyModified
-          ? shade.activeBorderHex
-          : isDark
-            ? shade.idleBorderDark
-            : shade.idleBorderLight,
-        boxShadow: isCurrentlyModified ? shade.activeGlowShadow : undefined,
+      onPointerMove={(e) => {
+        const rect = e.currentTarget.getBoundingClientRect();
+        const x = ((e.clientX - rect.left) / Math.max(1, rect.width)) * 100;
+        const y = ((e.clientY - rect.top) / Math.max(1, rect.height)) * 100;
+        e.currentTarget.style.setProperty('--lx', `${x.toFixed(1)}%`);
+        e.currentTarget.style.setProperty('--ly', `${y.toFixed(1)}%`);
       }}
-      className="p-4 rounded-2xl border space-y-3.5 transition-shadow cursor-pointer"
+      style={
+        {
+          '--illum-color': shade.activeBorderHex,
+          backgroundColor: isDark ? shade.surfaceBgDark : shade.surfaceBgLight,
+          borderColor: isCurrentlyModified
+            ? shade.activeBorderHex
+            : isDark
+              ? shade.idleBorderDark
+              : shade.idleBorderLight,
+          boxShadow: isCurrentlyModified ? shade.activeGlowShadow : undefined,
+        } as React.CSSProperties
+      }
+      className={`aether-illum-spotlight relative overflow-hidden p-4 rounded-2xl border space-y-3.5 transition-all duration-200 cursor-pointer ${
+        isCurrentlyModified ? 'ring-1 ring-white/55 dark:ring-white/25' : ''
+      }`}
     >
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
@@ -348,6 +361,7 @@ export const LiveFrontendModelPreview: React.FC = () => {
     removeGeneratedElement,
     moveGeneratedElementTarget,
     setGitHubExportModalOpen,
+    setLocalhostModalOpen,
     workingFrontendImage,
     composedElementShades,
     setElementCustomShade,
@@ -804,17 +818,31 @@ ${screenElements
           </h2>
         </div>
 
-        <button
-          type="button"
-          onClick={() => {
-            setGitHubExportModalOpen(true);
-            triggerPreviewFeedback(4);
-          }}
-          className="min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/90 dark:bg-emerald-900/75 border border-slate-200/85 dark:border-emerald-400/25 text-slate-800 dark:text-emerald-50 hover:opacity-95 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
-        >
-          <GitBranch className="w-3.5 h-3.5" />
-          <span>Repozytorium GitHub</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setLocalhostModalOpen(true);
+              triggerPreviewFeedback(5);
+            }}
+            className="min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-indigo-600 dark:bg-emerald-400 text-white dark:text-emerald-950 hover:opacity-95 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <Server className="w-3.5 h-3.5" />
+            <span>Host Localhost</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setGitHubExportModalOpen(true);
+              triggerPreviewFeedback(4);
+            }}
+            className="min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/90 dark:bg-emerald-900/75 border border-slate-200/85 dark:border-emerald-400/25 text-slate-800 dark:text-emerald-50 hover:opacity-95 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <GitBranch className="w-3.5 h-3.5" />
+            <span>GitHub</span>
+          </button>
+        </div>
       </div>
 
       {/* Synchronized Currently Modified Element Banner (Same Color as Modified Element) */}

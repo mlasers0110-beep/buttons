@@ -2,12 +2,15 @@ import React, { useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
   Check,
+  FileCode2,
+  FileText,
   FolderOpen,
   HardDriveDownload,
   ImagePlus,
   Layers,
   Palette,
   Plus,
+  Server,
   Sparkles,
   Trash2,
   Upload,
@@ -68,6 +71,10 @@ export const StartWorkspaceSection: React.FC<{
     generatedElements,
     addAttachedPromptGraphic,
     generatePlanAndMatrixFromFile,
+    generateFullFrontendFromUploadedFile,
+    setLocalhostModalOpen,
+    zeroLimitLocalMode,
+    setZeroLimitLocalMode,
     mediaLibrary,
     pulseInteraction,
   } = useStudio();
@@ -77,6 +84,12 @@ export const StartWorkspaceSection: React.FC<{
   const [uploadingImage, setUploadingImage] = useState<boolean>(false);
   const [analyzingAiPlan, setAnalyzingAiPlan] = useState<boolean>(false);
   const [aiPlanBanner, setAiPlanBanner] = useState<string | null>(null);
+  const [uploadedDocMeta, setUploadedDocMeta] = useState<{
+    file: File;
+    sizeKb: number;
+    kindLabel: string;
+  } | null>(null);
+  const [dragOverUpload, setDragOverUpload] = useState<boolean>(false);
   const [imgBroken, setImgBroken] = useState<boolean>(false);
   const [selectedQuickCatalogId, setSelectedQuickCatalogId] = useState<string>(
     TACTILE_UI_CATALOG[0]?.id || 'btn-primary-cta'
@@ -171,60 +184,104 @@ export const StartWorkspaceSection: React.FC<{
     }
   };
 
-  const handleUploadFrontendImageFile = async (file: File) => {
-    if (!file.type.startsWith('image/')) {
-      setDiskNotice('Wybierz plik graficzny (PNG, JPG lub WEBP) przedstawiający frontend.');
-      return;
-    }
+  const handleUnifiedUploadAndGenerate = async (
+    file: File,
+    autoBuildFrontend = true
+  ) => {
+    const ext = file.name.split('.').pop()?.toLowerCase() || '';
+    const isImg =
+      file.type.startsWith('image/') ||
+      ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext);
+
     setUploadingImage(true);
+    setAiPlanBanner(null);
     setImgBroken(false);
+
     try {
-      const state = await readImageFileToWorkingState(file);
-      setWorkingFrontendImage(state);
-      // Also attach to persistent master prompt graphics for seamless AI generation
-      addAttachedPromptGraphic({
-        name: state.fileName,
-        mimeType: state.mimeType,
-        dataUrl: state.dataUrl,
-        role: 'uklad-ekranu',
-      });
-      if (state.regions[0]) {
-        markElementAsActivelyModified({
-          id: state.regions[0].id,
-          kind: 'region',
-          label: state.regions[0].label,
-          zone: state.regions[0].zone,
-          screenId: activeScreen?.id,
-          shadeId: state.regions[0].shadeId,
-          sourceSurface: 'Obraz referencyjny frontendu',
+      if (isImg) {
+        const state = await readImageFileToWorkingState(file);
+        setWorkingFrontendImage(state);
+        setUploadedDocMeta({
+          file,
+          sizeKb: state.compressedSizeKb || Math.max(1, Math.round(file.size / 1024)),
+          kindLabel: `Obraz UI (${state.widthPx}×${state.heightPx} px${
+            state.originalSizeKb && state.compressedSizeKb
+              ? ` · skompresowano ${state.originalSizeKb} KB → ${state.compressedSizeKb} KB`
+              : ''
+          })`,
+        });
+        addAttachedPromptGraphic({
+          name: state.fileName,
+          mimeType: state.mimeType,
+          dataUrl: state.dataUrl,
+          role: 'uklad-ekranu',
+        });
+        if (state.regions[0]) {
+          markElementAsActivelyModified({
+            id: state.regions[0].id,
+            kind: 'region',
+            label: state.regions[0].label,
+            zone: state.regions[0].zone,
+            screenId: activeScreen?.id,
+            shadeId: state.regions[0].shadeId,
+            sourceSurface: 'Obraz referencyjny frontendu',
+          });
+        }
+      } else {
+        setUploadedDocMeta({
+          file,
+          sizeKb: Math.max(1, Math.round(file.size / 1024)),
+          kindLabel: `Specyfikacja / Kod (.${ext || 'txt'})`,
         });
       }
-      pulseInteraction(0.95);
+
+      if (autoBuildFrontend) {
+        setAnalyzingAiPlan(true);
+        const res = await generateFullFrontendFromUploadedFile(file, {
+          targetType: 'website-and-webapp',
+        });
+        setAiPlanBanner(
+          `Gotowe: wygenerowano kompletny frontend „${res.buildMatrix.projectTitle}” — ${res.mapProject.nodes.length} ekranów, ${res.createdElements.length} interaktywne moduły .tsx na żywym podglądzie oraz gotowość do prezentacji na Localhost.`
+        );
+      } else {
+        pulseInteraction(0.95);
+      }
     } catch (err) {
-      setDiskNotice(
-        err instanceof Error ? err.message : 'Nie udało się wczytać obrazu frontendu.'
+      setAiPlanBanner(
+        err instanceof Error
+          ? err.message
+          : 'Nie udało się przetworzyć wgranego pliku.'
       );
     } finally {
       setUploadingImage(false);
+      setAnalyzingAiPlan(false);
     }
   };
 
   const handleGenerateAiPlanFromFrontendImage = async () => {
+    if (uploadedDocMeta?.file) {
+      await handleUnifiedUploadAndGenerate(uploadedDocMeta.file, true);
+      return;
+    }
     if (!workingFrontendImage) return;
     setAnalyzingAiPlan(true);
     setAiPlanBanner(null);
     try {
+      const base64Clean = workingFrontendImage.dataUrl.includes(',')
+        ? workingFrontendImage.dataUrl.split(',')[1] || ''
+        : workingFrontendImage.dataUrl;
       const res = await generatePlanAndMatrixFromFile({
         fileName: workingFrontendImage.fileName,
         mimeType: workingFrontendImage.mimeType,
-        fileSize: Math.round(workingFrontendImage.dataUrl.length * 0.75),
-        base64Data: workingFrontendImage.dataUrl,
+        fileSize:
+          (workingFrontendImage.compressedSizeKb || 120) * 1024,
+        base64Data: base64Clean,
         projectGoal:
           'Odtwórz architekturę ekranów, sekcje i komponenty na podstawie wgranego obrazu frontendu.',
         targetType: 'website-and-webapp',
       });
       setAiPlanBanner(
-        `Utworzono mapę „${res.mapProject.name}” (${res.mapProject.nodes.length} ekranów) na podstawie wgranego obrazu frontendu.`
+        `Utworzono mapę „${res.mapProject.name}” (${res.mapProject.nodes.length} ekranów) oraz matrycę budowy bez błędów limitu zapytań.`
       );
       hapticAudio.triggerPress(synth, haptic, patterns, { pitchSemitones: 6 });
     } catch (err) {
@@ -337,7 +394,7 @@ export const StartWorkspaceSection: React.FC<{
           if (items[i].type.startsWith('image/')) {
             const f = items[i].getAsFile();
             if (f) {
-              await handleUploadFrontendImageFile(f);
+              await handleUnifiedUploadAndGenerate(f, true);
               break;
             }
           }
@@ -355,22 +412,34 @@ export const StartWorkspaceSection: React.FC<{
             <div className="text-xs text-slate-500 dark:text-emerald-300/80 flex flex-wrap items-center gap-1.5">
               <span>Sekcja Startowa Projektu</span>
               <span aria-hidden="true">·</span>
-              <span>Zapis Lokalny · Obraz Frontendu · Synchronizacja Odcieni</span>
+              <span>Wgrywanie Plików i Obrazów · Generator Zero-Limit · Serwer Localhost</span>
             </div>
             <h1
               style={{ textWrap: 'balance' }}
               className="text-2xl sm:text-3xl font-semibold tracking-tight text-slate-900 dark:text-emerald-50"
             >
-              Skonfiguruj miejsce zapisu na dysku lokalnym i wgraj obraz frontendu do pracy
+              Wgraj plik lub makietę UI, wygeneruj kompletny frontend i uruchom go na Localhost
             </h1>
             <p className="text-sm text-slate-600 dark:text-emerald-100/80 leading-relaxed">
-              Wskaż lokalny folder zapisu danych projektu, załaduj zrzut lub makietę frontendu,
-              a następnie komponuj elementy w odrębnych odcieniach kolorystycznych z natychmiastowym
-              podświetlaniem tym samym kolorem na żywym podglądzie obok.
+              Wskaż folder zapisu na dysku, upuść zrzut ekranu (PNG/JPG/WEBP) lub specyfikację
+              (PDF/MD/JSON/HTML/TSX) i wygeneruj jednym kliknięciem wieloekranowy frontend bez błędów
+              zbyt dużej liczby zapytań — gotowy do prezentacji na wbudowanym hoście `localhost:4173`.
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                setLocalhostModalOpen(true);
+                hapticAudio.triggerPress(synth, haptic, patterns, { pitchSemitones: 4 });
+              }}
+              className="min-h-[44px] px-4 py-2.5 rounded-xl text-xs font-semibold bg-indigo-600 dark:bg-emerald-500 text-white dark:text-emerald-950 hover:opacity-95 transition-opacity inline-flex items-center gap-2 cursor-pointer whitespace-nowrap"
+            >
+              <Server className="w-4 h-4 shrink-0" />
+              <span>Host Prezentacji Localhost</span>
+            </button>
+
             <button
               type="button"
               onClick={() => onEnterStudioTab('dashboard')}
@@ -557,37 +626,56 @@ export const StartWorkspaceSection: React.FC<{
         )}
       </section>
 
-      {/* Step 02: Upload Frontend Image & Interactive Shaded Region Overlay */}
+      {/* Step 02: Unified File & UI Image Upload + 1-Click Complete Frontend Generation */}
       <section
         style={cardSurfaceStyle}
         className="p-6 border border-white/80 dark:border-emerald-400/20 space-y-5"
       >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <div className="text-xs text-slate-500 dark:text-emerald-300/80 flex flex-wrap items-center gap-1.5">
+            <div className="text-xs text-slate-500 dark:text-emerald-300/80 flex flex-wrap items-center gap-1.5 font-mono tabular-nums">
               <span>Krok 2 z 3</span>
               <span aria-hidden="true">·</span>
               <span>
                 {workingFrontendImage
-                  ? `${workingFrontendImage.fileName} (${workingFrontendImage.widthPx}×${workingFrontendImage.heightPx} px)`
-                  : 'PNG, JPG, WEBP lub wklejenie ze schowka Ctrl+V'}
+                  ? `${workingFrontendImage.fileName} (${workingFrontendImage.widthPx}×${workingFrontendImage.heightPx} px${
+                      workingFrontendImage.compressedSizeKb
+                        ? ` · ${workingFrontendImage.compressedSizeKb} KB`
+                        : ''
+                    })`
+                  : uploadedDocMeta
+                    ? `${uploadedDocMeta.file.name} (${uploadedDocMeta.sizeKb} KB)`
+                    : 'Obrazy UI (PNG/JPG/WEBP) + Dokumenty i Kod (PDF/MD/TXT/JSON/HTML/TSX)'}
               </span>
             </div>
             <h2 className="text-lg sm:text-xl font-semibold text-slate-900 dark:text-emerald-50 mt-0.5">
-              02. Obraz frontendu, nad którym pracujesz
+              02. Wgraj obraz makiety lub plik specyfikacji → Wygeneruj kompletny frontend
             </h2>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            <label className="min-h-[40px] px-3 py-2 rounded-xl text-xs font-medium bg-white/85 dark:bg-emerald-950/75 border border-slate-200/85 dark:border-emerald-400/25 text-slate-800 dark:text-emerald-100 inline-flex items-center gap-2 cursor-pointer whitespace-nowrap">
+              <input
+                type="checkbox"
+                checked={zeroLimitLocalMode}
+                onChange={(e) => {
+                  setZeroLimitLocalMode(e.target.checked);
+                  hapticAudio.triggerPress(synth, haptic, patterns);
+                }}
+                className="rounded accent-indigo-600 dark:accent-emerald-400"
+              />
+              <span>Tryb Zero-Limit (0 ms, bez limitów zapytań)</span>
+            </label>
+
             <input
               ref={imageInputRef}
               type="file"
-              accept="image/*"
+              accept=".png,.jpg,.jpeg,.webp,.gif,.pdf,.md,.markdown,.txt,.json,.csv,.html,.htm,.tsx,.ts,.jsx"
               className="hidden"
               onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (file) {
-                  void handleUploadFrontendImageFile(file);
+                  void handleUnifiedUploadAndGenerate(file, true);
                   e.target.value = '';
                 }
               }}
@@ -595,16 +683,20 @@ export const StartWorkspaceSection: React.FC<{
             <button
               type="button"
               onClick={() => imageInputRef.current?.click()}
-              disabled={uploadingImage}
-              className="min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 dark:bg-emerald-400 text-white dark:text-emerald-950 hover:opacity-95 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+              disabled={uploadingImage || analyzingAiPlan}
+              className="min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 dark:bg-emerald-400 text-white dark:text-emerald-950 hover:opacity-95 inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60 whitespace-nowrap"
             >
               <ImagePlus className="w-4 h-4 shrink-0" />
               <span>
-                {workingFrontendImage ? 'Zmień obraz frontendu' : 'Wgraj obraz frontendu'}
+                {uploadingImage || analyzingAiPlan
+                  ? 'Przetwarzanie i budowa frontendu...'
+                  : workingFrontendImage || uploadedDocMeta
+                    ? 'Wgraj nowy plik i przebuduj frontend'
+                    : 'Wybierz plik lub obraz i zbuduj frontend'}
               </span>
             </button>
 
-            {workingFrontendImage && (
+            {(workingFrontendImage || uploadedDocMeta) && (
               <button
                 type="button"
                 disabled={analyzingAiPlan}
@@ -614,71 +706,182 @@ export const StartWorkspaceSection: React.FC<{
                 <Sparkles className="w-3.5 h-3.5 shrink-0" />
                 <span>
                   {analyzingAiPlan
-                    ? 'Analiza obrazu AI...'
-                    : 'Zbuduj plan ekranów AI z obrazu'}
+                    ? 'Budowanie ekranów i modułów...'
+                    : 'Przebuduj ekrany i moduły .tsx'}
                 </span>
               </button>
             )}
+
+            <button
+              type="button"
+              onClick={() => setLocalhostModalOpen(true)}
+              className="min-h-[40px] px-3.5 py-2 rounded-xl text-xs font-semibold bg-slate-900 dark:bg-emerald-800 text-white dark:text-emerald-50 hover:opacity-95 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+            >
+              <Server className="w-3.5 h-3.5 shrink-0" />
+              <span>Otwórz Localhost</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Clear 3-Step Upload & Generation Pipeline Indicator */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
+          <div className="p-3 rounded-xl bg-white/75 dark:bg-emerald-950/60 border border-slate-200/80 dark:border-emerald-400/20 flex items-center justify-between gap-2">
+            <span className="font-medium text-slate-800 dark:text-emerald-100">
+              1. Odczyt i kompresja pliku
+            </span>
+            <span className="font-mono tabular-nums text-[11px] text-slate-500 dark:text-emerald-300/85">
+              {workingFrontendImage || uploadedDocMeta ? 'Załadowano' : 'Oczekuje'}
+            </span>
+          </div>
+          <div className="p-3 rounded-xl bg-white/75 dark:bg-emerald-950/60 border border-slate-200/80 dark:border-emerald-400/20 flex items-center justify-between gap-2">
+            <span className="font-medium text-slate-800 dark:text-emerald-100">
+              2. Synteza ekranów i .tsx
+            </span>
+            <span className="font-mono tabular-nums text-[11px] text-slate-500 dark:text-emerald-300/85">
+              {analyzingAiPlan
+                ? 'W toku...'
+                : `${activeScreenMap.nodes.length} ekr. · ${generatedElements.length} .tsx`}
+            </span>
+          </div>
+          <div className="p-3 rounded-xl bg-white/75 dark:bg-emerald-950/60 border border-slate-200/80 dark:border-emerald-400/20 flex items-center justify-between gap-2">
+            <span className="font-medium text-slate-800 dark:text-emerald-100">
+              3. Ochrona przed limitem 429
+            </span>
+            <span className="font-mono tabular-nums text-[11px] text-emerald-700 dark:text-emerald-300">
+              {zeroLimitLocalMode ? 'Silnik lokalny (0 ms)' : 'Auto-Fallback aktywny'}
+            </span>
           </div>
         </div>
 
         {aiPlanBanner && (
-          <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-900/45 border border-emerald-200 dark:border-emerald-400/30 text-xs text-emerald-900 dark:text-emerald-100">
-            {aiPlanBanner}
+          <div className="p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-900/45 border border-emerald-200 dark:border-emerald-400/30 text-xs text-emerald-900 dark:text-emerald-100 flex flex-wrap items-center justify-between gap-3">
+            <span>{aiPlanBanner}</span>
+            <button
+              type="button"
+              onClick={() => setLocalhostModalOpen(true)}
+              className="px-3 py-1.5 rounded-lg font-semibold bg-emerald-800 dark:bg-emerald-400 text-white dark:text-emerald-950 cursor-pointer whitespace-nowrap"
+            >
+              Zobacz na Localhost:4173
+            </button>
           </div>
         )}
 
+        {/* Always-Visible Dropzone when no image is loaded OR compact drop bar when loaded */}
         {!workingFrontendImage ? (
           <div
             onDragOver={(e) => {
-              if (e.dataTransfer.types.includes('Files')) e.preventDefault();
+              if (e.dataTransfer.types.includes('Files')) {
+                e.preventDefault();
+                if (!dragOverUpload) setDragOverUpload(true);
+              }
             }}
+            onDragLeave={() => setDragOverUpload(false)}
             onDrop={(e) => {
+              setDragOverUpload(false);
               const file = e.dataTransfer.files?.[0];
               if (file) {
                 e.preventDefault();
-                void handleUploadFrontendImageFile(file);
+                void handleUnifiedUploadAndGenerate(file, true);
               }
             }}
-            className="p-8 rounded-2xl border-2 border-dashed border-slate-300/90 dark:border-emerald-400/30 bg-white/55 dark:bg-emerald-950/40 text-center space-y-4"
+            onClick={() => imageInputRef.current?.click()}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                imageInputRef.current?.click();
+              }
+            }}
+            className={`p-8 rounded-2xl border-2 border-dashed transition-all text-center space-y-4 cursor-pointer ${
+              dragOverUpload
+                ? 'border-indigo-500 bg-indigo-500/10 dark:border-emerald-300 dark:bg-emerald-900/45'
+                : 'border-slate-300/90 dark:border-emerald-400/35 bg-white/65 dark:bg-emerald-950/45 hover:bg-white/90 dark:hover:bg-emerald-950/70'
+            }`}
           >
-            <div className="space-y-1 max-w-lg mx-auto">
-              <p className="text-sm font-semibold text-slate-900 dark:text-emerald-50">
-                Upuść tutaj zrzut ekranu lub makietę frontendu (albo wklej Ctrl+V)
+            <div className="w-12 h-12 rounded-2xl bg-indigo-600/10 dark:bg-emerald-400/15 text-indigo-600 dark:text-emerald-300 mx-auto flex items-center justify-center">
+              <Upload className="w-6 h-6" />
+            </div>
+
+            <div className="space-y-1.5 max-w-xl mx-auto">
+              <p className="text-sm sm:text-base font-semibold text-slate-900 dark:text-emerald-50">
+                {uploadedDocMeta
+                  ? `Załadowano plik: ${uploadedDocMeta.file.name} (${uploadedDocMeta.kindLabel})`
+                  : 'Kliknij tutaj lub upuść plik makiety / specyfikacji (albo wklej obraz Ctrl+V)'}
               </p>
-              <p className="text-xs text-slate-500 dark:text-emerald-200/75">
-                Po wgraniu obrazu aplikacja nałoży strefy kolorystyczne zsynchronizowane
-                z komponowanymi elementami oraz z żywym podglądem modelu po prawej stronie.
+              <p className="text-xs text-slate-600 dark:text-emerald-200/80 leading-relaxed">
+                Obsługiwane jednym kliknięciem: <strong>PNG, JPG, WEBP, GIF</strong> (automatyczna
+                kompresja obrazu zapobiegająca błędom sieciowym) oraz <strong>PDF, Markdown (.md), TXT, JSON, CSV, HTML, TSX</strong>.
+                System od razu wygeneruje mapę ekranów, matrycę budowy i żywe moduły frontendu po prawej stronie.
               </p>
             </div>
 
-            {sampleImages.length > 0 && (
-              <div className="pt-2 space-y-2">
-                <div className="text-[11px] text-slate-500 dark:text-emerald-300/80">
-                  Lub wybierz gotowy wzorzec referencyjny z biblioteki studia:
-                </div>
-                <div className="flex flex-wrap items-center justify-center gap-2">
-                  {sampleImages.map((sample) => (
-                    <button
-                      key={sample.id}
-                      type="button"
-                      onClick={async () => {
-                        const state = await createWorkingStateFromAssetUrl({
-                          title: sample.title,
-                          src: sample.src,
-                        });
-                        setWorkingFrontendImage(state);
-                        setImgBroken(false);
-                        hapticAudio.triggerPress(synth, haptic, patterns);
-                      }}
-                      className="px-3 py-1.5 rounded-xl text-xs font-medium bg-white dark:bg-emerald-900/75 border border-slate-200/85 dark:border-emerald-400/25 text-slate-800 dark:text-emerald-50 hover:opacity-95 cursor-pointer whitespace-nowrap"
-                    >
-                      Załaduj wzorzec: {sample.title}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="pt-2 flex flex-wrap items-center justify-center gap-2"
+            >
+              <button
+                type="button"
+                onClick={async () => {
+                  const demoContent = `# Platforma Medyczna i Portal Rezerwacji AetherClinic\n- Strona główna z kwalifikatorem wizyt i cennikiem zabiegów\n- Panel pacjenta (/portal) z kalendarzem rezerwacji i wynikami badań\n- Konsola specjalisty (/gabinet) z harmonogramem przyjęć`;
+                  const demoFile = new File(
+                    [demoContent],
+                    'specyfikacja-frontendu-demo.md',
+                    { type: 'text/markdown' }
+                  );
+                  await handleUnifiedUploadAndGenerate(demoFile, true);
+                }}
+                className="min-h-[36px] px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-slate-900 dark:bg-emerald-400 text-white dark:text-emerald-950 hover:opacity-95 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>Przetestuj 1-klikiem z gotowego pliku .md</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  const demoJson = JSON.stringify(
+                    {
+                      project: 'Vanguard SaaS Analytics',
+                      websiteSections: ['Hero Kokpitu KPI', 'Porównanie Planów B2B'],
+                      webAppModules: [
+                        { route: '/app/raporty', role: 'Analityk', features: ['Filtry kohortowe', 'Eksport CSV'] },
+                        { route: '/app/alerty', role: 'Manager', features: ['Progi anomalii', 'Powiadomienia'] },
+                      ],
+                    },
+                    null,
+                    2
+                  );
+                  const demoFile = new File([demoJson], 'architektura-saas.json', {
+                    type: 'application/json',
+                  });
+                  await handleUnifiedUploadAndGenerate(demoFile, true);
+                }}
+                className="min-h-[36px] px-3.5 py-1.5 rounded-xl text-xs font-medium bg-white dark:bg-emerald-900/80 border border-slate-200/85 dark:border-emerald-400/25 text-slate-800 dark:text-emerald-50 hover:opacity-95 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+              >
+                <FileCode2 className="w-3.5 h-3.5" />
+                <span>Przetestuj z pliku architektury .json</span>
+              </button>
+
+              {sampleImages.map((sample) => (
+                <button
+                  key={sample.id}
+                  type="button"
+                  onClick={async () => {
+                    const state = await createWorkingStateFromAssetUrl({
+                      title: sample.title,
+                      src: sample.src,
+                    });
+                    setWorkingFrontendImage(state);
+                    setImgBroken(false);
+                    hapticAudio.triggerPress(synth, haptic, patterns);
+                  }}
+                  className="min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-medium bg-white dark:bg-emerald-900/75 border border-slate-200/85 dark:border-emerald-400/25 text-slate-800 dark:text-emerald-50 hover:opacity-95 cursor-pointer whitespace-nowrap"
+                >
+                  Wzorzec UI: {sample.title}
+                </button>
+              ))}
+            </div>
           </div>
         ) : (
           <div className="space-y-4">

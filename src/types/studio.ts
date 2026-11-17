@@ -43,6 +43,33 @@ export interface SynthPatchSettings {
   subBassLevel: number; // 0 - 0.8
 }
 
+export type MinimalistLowClickId =
+  | 'sub-carbon-6ms'
+  | 'quartz-detent-8ms'
+  | 'monolith-thud-12ms'
+  | 'ceramic-pip-5ms'
+  | 'satin-tick-4ms'
+  | 'anodized-relay-9ms'
+  | 'vacuum-seal-14ms'
+  | 'titanium-whisper-7ms';
+
+export interface MinimalistLowClickSpec {
+  id: MinimalistLowClickId;
+  namePl: string;
+  shortLabelPl: string;
+  categoryPl: string;
+  descriptionPl: string;
+  fundamentalHz: number; // strictly < 160 Hz (42 - 112 Hz)
+  pitchDropHz: number; // sub-bass settle frequency (26 - 68 Hz)
+  durationMs: number; // ultra-short 4 - 14 ms
+  waveform: 'sine' | 'triangle';
+  microTransientLevel: number; // 0.04 - 0.28 subtle dry contact
+  vibratePulseMs: number; // 3 - 10 ms single clean micro-pulse
+  recommendedMaterial: HapticMaterialType;
+  accentHex: string;
+  codeSnippet: string;
+}
+
 export interface HapticSettings {
   enabled: boolean;
   material: HapticMaterialType;
@@ -52,6 +79,7 @@ export interface HapticSettings {
   reverseClutchForce: number; // 0 - 100 %
   holdRampMultiplier: number; // 1.0 - 3.0x
   activePatternId: string;
+  minimalistClickVariant?: MinimalistLowClickId | 'none';
 }
 
 export interface CustomHapticPattern {
@@ -324,6 +352,145 @@ export const BUILTIN_HAPTIC_PATTERNS: CustomHapticPattern[] = [
     pulses: [12, 14, 18, 14, 26, 16, 42],
     hardness: 72,
     reverseClutch: 62,
+  },
+];
+
+export const MINIMALIST_LOW_CLICK_VARIANTS: MinimalistLowClickSpec[] = [
+  {
+    id: 'sub-carbon-6ms',
+    namePl: '01. Karbonowy Mikro-Styk',
+    shortLabelPl: 'Karbon 58 Hz · 6 ms',
+    categoryPl: 'Ultra-krótki styk matowy',
+    descriptionPl:
+      'Suchy, punktowy impuls włókna węglowego 58 Hz wygaszany w 6 ms do zera bez jakiegokolwiek dzwonienia wysokotonowego.',
+    fundamentalHz: 58,
+    pitchDropHz: 34,
+    durationMs: 6,
+    waveform: 'sine',
+    microTransientLevel: 0.14,
+    vibratePulseMs: 4,
+    recommendedMaterial: 'matte-metal',
+    accentHex: '#38BDF8',
+    codeSnippet: 'hapticAudio.triggerMinimalistLowClick("sub-carbon-6ms") // 58→34 Hz · 6 ms',
+  },
+  {
+    id: 'quartz-detent-8ms',
+    namePl: '02. Kwarcowy Detent Optyczny',
+    shortLabelPl: 'Kwarc 82 Hz · 8 ms',
+    categoryPl: 'Czysty impuls kryształu',
+    descriptionPl:
+      'Minimalistyczne, krótkie kliknięcie precyzyjnej soczewki kwarcowej 82 Hz z natychmiastowym tłumieniem krawędziowym.',
+    fundamentalHz: 82,
+    pitchDropHz: 46,
+    durationMs: 8,
+    waveform: 'sine',
+    microTransientLevel: 0.18,
+    vibratePulseMs: 5,
+    recommendedMaterial: 'shiny-glass',
+    accentHex: '#818CF8',
+    codeSnippet: 'hapticAudio.triggerMinimalistLowClick("quartz-detent-8ms") // 82→46 Hz · 8 ms',
+  },
+  {
+    id: 'monolith-thud-12ms',
+    namePl: '03. Monolityczny Sub-Impuls',
+    shortLabelPl: 'Monolit 46 Hz · 12 ms',
+    categoryPl: 'Głęboki fundament <50 Hz',
+    descriptionPl:
+      'Niskoczęstotliwościowe, gęste uderzenie bryły 46 Hz z wyczuwalną masą fizyczną i zerowym szumem mechanicznym.',
+    fundamentalHz: 46,
+    pitchDropHz: 28,
+    durationMs: 12,
+    waveform: 'sine',
+    microTransientLevel: 0.06,
+    vibratePulseMs: 8,
+    recommendedMaterial: 'suede',
+    accentHex: '#34D399',
+    codeSnippet: 'hapticAudio.triggerMinimalistLowClick("monolith-thud-12ms") // 46→28 Hz · 12 ms',
+  },
+  {
+    id: 'ceramic-pip-5ms',
+    namePl: '04. Ceramiczna Zapadka Punktowa',
+    shortLabelPl: 'Ceramika 96 Hz · 5 ms',
+    categoryPl: 'Mikro-przeskok 5 ms',
+    descriptionPl:
+      'Chirurgicznie krótka zapadka spiekanej ceramiki 96 Hz — idealna do gęstych nawigacji, zakładek i przełączników.',
+    fundamentalHz: 96,
+    pitchDropHz: 52,
+    durationMs: 5,
+    waveform: 'triangle',
+    microTransientLevel: 0.22,
+    vibratePulseMs: 4,
+    recommendedMaterial: 'frosted-glass',
+    accentHex: '#A78BFA',
+    codeSnippet: 'hapticAudio.triggerMinimalistLowClick("ceramic-pip-5ms") // 96→52 Hz · 5 ms',
+  },
+  {
+    id: 'satin-tick-4ms',
+    namePl: '05. Satynowy Suchy Mikro-Tik',
+    shortLabelPl: 'Satyna 112 Hz · 4 ms',
+    categoryPl: 'Najszybszy impuls 4 ms',
+    descriptionPl:
+      'Ultrakrótki, niemal podprogowy tik 112 Hz (4 ms) do szybkich serii kliknięć, list wyboru i kafelków narzędziowych.',
+    fundamentalHz: 112,
+    pitchDropHz: 64,
+    durationMs: 4,
+    waveform: 'triangle',
+    microTransientLevel: 0.24,
+    vibratePulseMs: 3,
+    recommendedMaterial: 'abs-plastic',
+    accentHex: '#F59E0B',
+    codeSnippet: 'hapticAudio.triggerMinimalistLowClick("satin-tick-4ms") // 112→64 Hz · 4 ms',
+  },
+  {
+    id: 'anodized-relay-9ms',
+    namePl: '06. Anodowany Mikro-Przekaźnik',
+    shortLabelPl: 'Przekaźnik 68 Hz · 9 ms',
+    categoryPl: 'Mechanika studyjna CNC',
+    descriptionPl:
+      'Zwarty klik miniaturowego przekaźnika w obudowie z anodowanego aluminium (68 Hz, 9 ms) o aksamitnym wygaszeniu.',
+    fundamentalHz: 68,
+    pitchDropHz: 38,
+    durationMs: 9,
+    waveform: 'triangle',
+    microTransientLevel: 0.19,
+    vibratePulseMs: 6,
+    recommendedMaterial: 'matte-metal',
+    accentHex: '#2DD4BF',
+    codeSnippet: 'hapticAudio.triggerMinimalistLowClick("anodized-relay-9ms") // 68→38 Hz · 9 ms',
+  },
+  {
+    id: 'vacuum-seal-14ms',
+    namePl: '07. Próżniowe Domknięcie Tafli',
+    shortLabelPl: 'Próżnia 42 Hz · 14 ms',
+    categoryPl: 'Miękka kompresja sub-basu',
+    descriptionPl:
+      'Najniższy w kolekcji, ciepły impuls podciśnieniowy 42 Hz (14 ms) przypominający magnetyczne domknięcie etui.',
+    fundamentalHz: 42,
+    pitchDropHz: 26,
+    durationMs: 14,
+    waveform: 'sine',
+    microTransientLevel: 0.05,
+    vibratePulseMs: 9,
+    recommendedMaterial: 'frosted-glass',
+    accentHex: '#60A5FA',
+    codeSnippet: 'hapticAudio.triggerMinimalistLowClick("vacuum-seal-14ms") // 42→26 Hz · 14 ms',
+  },
+  {
+    id: 'titanium-whisper-7ms',
+    namePl: '08. Tytanowy Cichy Klik Nocny',
+    shortLabelPl: 'Tytan 74 Hz · 7 ms',
+    categoryPl: 'Tryb skupienia / Low-SPL',
+    descriptionPl:
+      'Dyskretny, wyważony akustycznie impuls 74 Hz (7 ms) zaprojektowany do wielogodzinnej pracy bez zmęczenia słuchu.',
+    fundamentalHz: 74,
+    pitchDropHz: 41,
+    durationMs: 7,
+    waveform: 'sine',
+    microTransientLevel: 0.11,
+    vibratePulseMs: 5,
+    recommendedMaterial: 'matte-metal',
+    accentHex: '#F472B6',
+    codeSnippet: 'hapticAudio.triggerMinimalistLowClick("titanium-whisper-7ms") // 74→41 Hz · 7 ms',
   },
 ];
 
@@ -819,6 +986,7 @@ export type PrototypeDropZone = 'header' | 'main' | 'footer';
 
 export type TactileWidgetCategory =
   | 'buttons'
+  | 'minimal-clicks'
   | 'sliders'
   | 'levers'
   | 'touch-rotary';
@@ -1470,6 +1638,8 @@ export interface WorkingFrontendImageState {
   dataUrl: string;
   widthPx: number;
   heightPx: number;
+  originalSizeKb?: number;
+  compressedSizeKb?: number;
   uploadedAt: string;
   notes?: string;
   regions: FrontendImageRegion[];

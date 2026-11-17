@@ -3,6 +3,9 @@ import {
   HapticMaterialType,
   HapticSettings,
   MATERIAL_PROFILES,
+  MINIMALIST_LOW_CLICK_VARIANTS,
+  MinimalistLowClickId,
+  MinimalistLowClickSpec,
   RotaryDriverCalibrationConfig,
   SynthPatchSettings,
 } from '../types/studio';
@@ -314,6 +317,90 @@ class HapticAudioEngine {
     });
   }
 
+  public triggerMinimalistLowClick(
+    variantId: MinimalistLowClickId,
+    intensityScale = 1
+  ): void {
+    const spec: MinimalistLowClickSpec =
+      MINIMALIST_LOW_CLICK_VARIANTS.find((v) => v.id === variantId) ||
+      MINIMALIST_LOW_CLICK_VARIANTS[0];
+
+    const gainNorm = Math.max(0.08, Math.min(1.35, intensityScale));
+    this.lastTriggeredMaterial = spec.recommendedMaterial;
+    this.lastConfiguredBodyHz = spec.fundamentalHz;
+
+    const pulseMs = Math.max(2, Math.round(spec.vibratePulseMs * gainNorm));
+    this.triggerVibrate([pulseMs]);
+    this.pressImpulse = Math.min(
+      1.45,
+      Math.max(this.pressImpulse, 0.38 + 0.58 * gainNorm)
+    );
+
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+
+    const outNode = this.getOutputNode(ctx);
+    const now = ctx.currentTime;
+    const durSec = Math.max(0.004, Math.min(0.02, spec.durationMs / 1000));
+    // Add tiny zero-crossing release tail so ultra-short 4-14ms pulses never produce digital DC pop
+    const totalEnvSec = durSec + 0.006;
+
+    const startHz = Math.max(36, Math.min(154, spec.fundamentalHz));
+    const endHz = Math.max(24, Math.min(120, spec.pitchDropHz));
+
+    const bodyOsc = ctx.createOscillator();
+    bodyOsc.type = spec.waveform;
+    bodyOsc.frequency.setValueAtTime(startHz, now);
+    bodyOsc.frequency.exponentialRampToValueAtTime(endHz, now + totalEnvSec);
+
+    const subOsc = ctx.createOscillator();
+    subOsc.type = 'sine';
+    subOsc.frequency.setValueAtTime(Math.max(24, startHz * 0.5), now);
+
+    // Strict <160 Hz acoustic low-pass barrier for pure minimalist low-end character
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(152, now);
+    lp.Q.setValueAtTime(0.85, now);
+
+    const subGain = ctx.createGain();
+    subGain.gain.setValueAtTime(0.24 * gainNorm, now);
+
+    const envGain = ctx.createGain();
+    const peakAmp = Math.min(0.46, 0.34 * gainNorm);
+    envGain.gain.setValueAtTime(0.0001, now);
+    envGain.gain.linearRampToValueAtTime(peakAmp, now + 0.0009);
+    envGain.gain.exponentialRampToValueAtTime(0.0001, now + totalEnvSec);
+
+    bodyOsc.connect(lp);
+    subOsc.connect(subGain);
+    subGain.connect(lp);
+    lp.connect(envGain);
+    envGain.connect(outNode);
+
+    bodyOsc.start(now);
+    subOsc.start(now);
+    bodyOsc.stop(now + totalEnvSec + 0.004);
+    subOsc.stop(now + totalEnvSec + 0.004);
+
+    // Ultra-short damped mechanical contact (< 900 Hz) without high-frequency harshness
+    if (spec.microTransientLevel > 0.02) {
+      const clickOsc = ctx.createOscillator();
+      clickOsc.type = 'triangle';
+      clickOsc.frequency.setValueAtTime(Math.min(780, startHz * 6.2), now);
+      clickOsc.frequency.exponentialRampToValueAtTime(140, now + 0.0028);
+
+      const clickGain = ctx.createGain();
+      clickGain.gain.setValueAtTime(spec.microTransientLevel * 0.28 * gainNorm, now);
+      clickGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.0032);
+
+      clickOsc.connect(clickGain);
+      clickGain.connect(outNode);
+      clickOsc.start(now);
+      clickOsc.stop(now + 0.0045);
+    }
+  }
+
   public triggerPress(
     synth: SynthPatchSettings,
     haptic: HapticSettings,
@@ -324,6 +411,17 @@ class HapticAudioEngine {
       intensityScale?: number;
     }
   ): void {
+    if (
+      haptic.enabled &&
+      haptic.minimalistClickVariant &&
+      haptic.minimalistClickVariant !== 'none'
+    ) {
+      const scale =
+        Math.max(0.1, haptic.intensity / 100) * (options?.intensityScale ?? 1);
+      this.triggerMinimalistLowClick(haptic.minimalistClickVariant, scale);
+      return;
+    }
+
     const mat = options?.material || haptic.material;
     const profile = MATERIAL_PROFILES[mat];
     const sig = MATERIAL_ACOUSTIC_SIGNATURES[mat];
@@ -1337,3 +1435,138 @@ class HapticAudioEngine {
 }
 
 export const hapticAudio = new HapticAudioEngine();
+
+export function exportMinimalistLowClickAsset(
+  variantId: MinimalistLowClickId,
+  format: 'wav' | 'json'
+): { fileName: string; durationMs: number; fundamentalHz: number } {
+  const spec =
+    MINIMALIST_LOW_CLICK_VARIANTS.find((v) => v.id === variantId) ||
+    MINIMALIST_LOW_CLICK_VARIANTS[0];
+
+  if (format === 'json') {
+    const payload = {
+      schema: 'aether.minimalist-low-click.v1',
+      id: spec.id,
+      namePl: spec.namePl,
+      categoryPl: spec.categoryPl,
+      verifiedSub160Hz: spec.fundamentalHz < 160,
+      fundamentalHz: spec.fundamentalHz,
+      pitchDropHz: spec.pitchDropHz,
+      durationMs: spec.durationMs,
+      waveform: spec.waveform,
+      microTransientLevel: spec.microTransientLevel,
+      vibratePulseMs: spec.vibratePulseMs,
+      recommendedMaterial: spec.recommendedMaterial,
+      exportedAt: new Date().toISOString(),
+    };
+    const jsonBlob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    });
+    const fileName = `aether-minimal-click-${spec.id}.json`;
+    const url = URL.createObjectURL(jsonBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    window.setTimeout(() => URL.revokeObjectURL(url), 2500);
+    return {
+      fileName,
+      durationMs: spec.durationMs,
+      fundamentalHz: spec.fundamentalHz,
+    };
+  }
+
+  // Synthesize crisp 48 kHz 16-bit mono WAV buffer with generous 36 ms window around the 4–14 ms pulse
+  const sampleRate = 48000;
+  const totalWindowSec = 0.04;
+  const numSamples = Math.floor(sampleRate * totalWindowSec);
+  const pcmFloat = new Float32Array(numSamples);
+
+  const durSec = Math.max(0.004, spec.durationMs / 1000) + 0.006;
+  let phaseBody = 0;
+  let phaseSub = 0;
+  let phaseTransient = 0;
+
+  for (let i = 0; i < numSamples; i++) {
+    const t = i / sampleRate;
+    if (t <= durSec) {
+      const progress = Math.min(1, t / durSec);
+      const instHz =
+        spec.fundamentalHz * Math.pow(spec.pitchDropHz / spec.fundamentalHz, progress);
+      phaseBody += (2 * Math.PI * instHz) / sampleRate;
+      phaseSub += (2 * Math.PI * (instHz * 0.5)) / sampleRate;
+
+      const bodySample =
+        spec.waveform === 'triangle'
+          ? (2 / Math.PI) * Math.asin(Math.sin(phaseBody))
+          : Math.sin(phaseBody);
+      const subSample = Math.sin(phaseSub) * 0.34;
+
+      const attackEnv = Math.min(1, t / 0.0009);
+      const decayEnv = Math.exp((-4.6 * t) / durSec);
+      let sample = (bodySample * 0.72 + subSample) * attackEnv * decayEnv;
+
+      if (t < 0.0032 && spec.microTransientLevel > 0.02) {
+        const clickHz = Math.min(760, spec.fundamentalHz * 6.0) * Math.exp(-t / 0.0018);
+        phaseTransient += (2 * Math.PI * clickHz) / sampleRate;
+        sample +=
+          Math.sin(phaseTransient) *
+          spec.microTransientLevel *
+          0.32 *
+          Math.exp(-t / 0.0011);
+      }
+
+      pcmFloat[i] = Math.max(-0.98, Math.min(0.98, sample));
+    } else {
+      pcmFloat[i] = 0;
+    }
+  }
+
+  const wavByteLen = 44 + numSamples * 2;
+  const wavBuffer = new ArrayBuffer(wavByteLen);
+  const view = new DataView(wavBuffer);
+  const writeAscii = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  };
+
+  writeAscii(0, 'RIFF');
+  view.setUint32(4, 36 + numSamples * 2, true);
+  writeAscii(8, 'WAVE');
+  writeAscii(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // Mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeAscii(36, 'data');
+  view.setUint32(40, numSamples * 2, true);
+
+  for (let i = 0; i < numSamples; i++) {
+    const s = Math.max(-1, Math.min(1, pcmFloat[i]));
+    view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+
+  const wavBlob = new Blob([wavBuffer], { type: 'audio/wav' });
+  const fileName = `aether-minimal-click-${spec.id}-${spec.fundamentalHz}Hz-${spec.durationMs}ms.wav`;
+  const url = URL.createObjectURL(wavBlob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  window.setTimeout(() => URL.revokeObjectURL(url), 2500);
+
+  return {
+    fileName,
+    durationMs: spec.durationMs,
+    fundamentalHz: spec.fundamentalHz,
+  };
+}

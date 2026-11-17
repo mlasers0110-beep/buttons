@@ -966,8 +966,47 @@ export async function analyzePhotoOffline(body: {
   };
 }
 
+const ZERO_LIMIT_LOCAL_MODE_KEY = 'aether_zero_limit_local_mode_v1';
+
+export function getZeroLimitLocalMode(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.localStorage.getItem(ZERO_LIMIT_LOCAL_MODE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function setZeroLimitLocalMode(enabled: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (enabled) {
+      window.localStorage.setItem(ZERO_LIMIT_LOCAL_MODE_KEY, '1');
+    } else {
+      window.localStorage.removeItem(ZERO_LIMIT_LOCAL_MODE_KEY);
+    }
+  } catch {
+    // Ignore restricted storage
+  }
+}
+
+function hasLocalSynthesisEngineForPath(path: string): boolean {
+  return (
+    path === '/api/driver-calibration/analyze' ||
+    path === '/api/gemini/optimize-animation' ||
+    path === '/api/gemini/expand-prompt' ||
+    path === '/api/screen-map/refine-image-prompt' ||
+    path === '/api/screen-map/from-github' ||
+    path === '/api/screen-map/from-file' ||
+    path === '/api/gemini/generate-image' ||
+    path === '/api/gemini/analyze-image' ||
+    path === '/api/gemini/generate-complete-element' ||
+    path === '/api/gemini/generate-repo-profile'
+  );
+}
+
 // ============================================================================
-// Unified Offline-Aware Studio API Router (`studioApiFetch`)
+// Unified Offline-Aware & Quota-Resilient Studio API Router (`studioApiFetch`)
 // ============================================================================
 export async function studioApiFetch(
   path: string,
@@ -977,6 +1016,8 @@ export async function studioApiFetch(
   const isFileMode =
     typeof window !== 'undefined' && window.location.protocol === 'file:';
   const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+  const preferLocalZeroLimit =
+    getZeroLimitLocalMode() && hasLocalSynthesisEngineForPath(path);
 
   const headers = new Headers(options.headers || {});
   if (!headers.has('Content-Type') && options.body) {
@@ -990,12 +1031,12 @@ export async function studioApiFetch(
   }
 
   const canTryNetwork =
-    isOnline && (!isFileMode || Boolean(baseOrigin));
+    !preferLocalZeroLimit && isOnline && (!isFileMode || Boolean(baseOrigin));
 
   if (canTryNetwork) {
     try {
       const controller = new AbortController();
-      const timeoutMs = path.includes('generate-video') ? 180000 : 25000;
+      const timeoutMs = path.includes('generate-video') ? 180000 : 22000;
       const timer = window.setTimeout(() => controller.abort(), timeoutMs);
       const resp = await fetch(`${baseOrigin}${path}`, {
         ...options,
@@ -1003,11 +1044,27 @@ export async function studioApiFetch(
         signal: options.signal || controller.signal,
       });
       window.clearTimeout(timer);
-      if (resp.ok || (resp.status >= 400 && resp.status < 500 && resp.status !== 404)) {
+
+      if (resp.ok) {
+        return resp;
+      }
+
+      // If quota / rate limit (429), permission/billing tier (403), timeout (408), or 5xx occurs
+      // on a route backed by our deterministic local synthesis engine, seamlessly synthesize locally
+      // instead of surfacing a blocking "zbyt duża ilość zapytań" error!
+      const shouldFallbackToLocal =
+        hasLocalSynthesisEngineForPath(path) &&
+        (resp.status === 429 ||
+          resp.status === 403 ||
+          resp.status === 404 ||
+          resp.status === 408 ||
+          resp.status >= 500);
+
+      if (!shouldFallbackToLocal && resp.status >= 400 && resp.status < 500 && resp.status !== 404) {
         return resp;
       }
     } catch {
-      // Network unreachable or standalone offline mode — seamlessly execute local offline engine below!
+      // Network unreachable, timed out, or standalone offline mode — seamlessly execute local engine below
     }
   }
 

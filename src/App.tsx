@@ -13,6 +13,7 @@ import {
   MessageSquareCode,
   Monitor,
   PlugZap,
+  Server,
 } from 'lucide-react';
 import { StudioProvider, useStudio } from './context/StudioContext';
 import { StartWorkspaceSection } from './components/StartWorkspaceSection';
@@ -35,6 +36,7 @@ import {
 } from './components/PersistentMasterPromptWindow';
 import { GitHubRepoExportModal } from './components/GitHubRepoExportModal';
 import { ExternalPluginsModal } from './components/ExternalPluginsHub';
+import { LocalhostPresentationModal } from './components/LocalhostPresentationModal';
 import { hapticAudio } from './lib/hapticAudioEngine';
 import { hasTactileCatalogDrag } from './lib/tactileUiCatalog';
 import {
@@ -63,6 +65,9 @@ const StudioShell: React.FC = () => {
     attachedPromptGraphics,
     generatedElements,
     setGitHubExportModalOpen,
+    setLocalhostModalOpen,
+    zeroLimitLocalMode,
+    setZeroLimitLocalMode,
     externalPlugins,
     setPluginsModalOpen,
     localDiskConfig,
@@ -290,6 +295,31 @@ const StudioShell: React.FC = () => {
             <span className="hidden sm:inline text-slate-500 dark:text-emerald-300/80 font-mono tabular-nums whitespace-nowrap">
               Grafiki: {attachedPromptGraphics.length} · Elementy .tsx: {generatedElements.length}
             </span>
+
+            <label className="min-h-[38px] px-2.5 py-1.5 rounded-xl text-xs font-medium bg-white/85 dark:bg-emerald-900/70 border border-slate-200/80 dark:border-emerald-400/25 text-slate-800 dark:text-emerald-100 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0">
+              <input
+                type="checkbox"
+                checked={zeroLimitLocalMode}
+                onChange={(e) => {
+                  setZeroLimitLocalMode(e.target.checked);
+                  hapticAudio.triggerPress(synth, haptic, patterns);
+                }}
+                className="rounded accent-indigo-600 dark:accent-emerald-400"
+              />
+              <span>Zero-Limit</span>
+            </label>
+
+            <button
+              type="button"
+              onClick={() => {
+                setLocalhostModalOpen(true);
+                hapticAudio.triggerPress(synth, haptic, patterns, { pitchSemitones: 4 });
+              }}
+              className="min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold bg-indigo-600 dark:bg-emerald-500 text-white dark:text-emerald-950 hover:opacity-95 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <Server className="w-3.5 h-3.5" />
+              <span>Host Localhost</span>
+            </button>
 
             <button
               type="button"
@@ -523,6 +553,14 @@ const StudioShell: React.FC = () => {
           <span aria-hidden="true">·</span>
           <button
             type="button"
+            onClick={() => setLocalhostModalOpen(true)}
+            className="underline hover:text-slate-800 dark:hover:text-emerald-100 cursor-pointer whitespace-nowrap"
+          >
+            Host prezentacji Localhost:4173
+          </button>
+          <span aria-hidden="true">·</span>
+          <button
+            type="button"
             onClick={() => setGitHubExportModalOpen(true)}
             className="underline hover:text-slate-800 dark:hover:text-emerald-100 cursor-pointer whitespace-nowrap"
           >
@@ -538,6 +576,9 @@ const StudioShell: React.FC = () => {
           </button>
         </div>
       </footer>
+
+      {/* Localhost Frontend Presentation Host & Server Builder Modal */}
+      <LocalhostPresentationModal />
 
       {/* External Application Plugins Modal */}
       <ExternalPluginsModal />
