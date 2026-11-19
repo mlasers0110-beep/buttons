@@ -164,6 +164,97 @@ function getGenAIClient(): GoogleGenAI {
   });
 }
 
+function detectMimeFromMagicBytes(buf: Buffer, fallback = 'image/jpeg'): string {
+  if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+    return 'image/png';
+  }
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  if (
+    buf.length >= 12 &&
+    buf.toString('ascii', 0, 4) === 'RIFF' &&
+    buf.toString('ascii', 8, 12) === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+  if (buf.length >= 6 && buf.toString('ascii', 0, 4) === 'GIF8') {
+    return 'image/gif';
+  }
+  const normalized = fallback.toLowerCase().trim();
+  return normalized === 'image/jpg' ? 'image/jpeg' : normalized || 'image/jpeg';
+}
+
+function resolveInlineImagePart(
+  rawInput: unknown,
+  fallbackMime = 'image/jpeg'
+): { mimeType: string; data: string } {
+  const str = String(rawInput || '').trim();
+  if (!str) {
+    throw new Error('Brak danych obrazu do rozpoznania.');
+  }
+
+  // Case 1: Relative local asset path (e.g. /assets/aistudio/foo.jpg)
+  if (str.startsWith('/assets/') || str.startsWith('assets/')) {
+    const publicDir = path.resolve(__dirname, 'public');
+    const rel = str.replace(/^\/+/, '');
+    const fullPath = path.resolve(publicDir, rel);
+    if (!fullPath.startsWith(publicDir + path.sep) || !fs.existsSync(fullPath)) {
+      throw new Error('Nie znaleziono wskazanego pliku graficznego na serwerze.');
+    }
+    const fileBuf = fs.readFileSync(fullPath);
+    if (fileBuf.length < 16) {
+      throw new Error('Plik graficzny jest pusty lub uszkodzony.');
+    }
+    return {
+      mimeType: detectMimeFromMagicBytes(fileBuf, fallbackMime),
+      data: fileBuf.toString('base64'),
+    };
+  }
+
+  // Case 2: Data URL (data:image/jpeg;base64,...)
+  const dataUrlMatch = str.match(/^data:([^;]+);base64,([\s\S]+)$/i);
+  if (dataUrlMatch) {
+    const headerMime = dataUrlMatch[1].toLowerCase().trim();
+    const cleanBase64 = dataUrlMatch[2].replace(/\s+/g, '');
+    if (cleanBase64.length < 16) {
+      throw new Error('Przesłany obraz jest pusty lub uszkodzony.');
+    }
+    const probeBuf = Buffer.from(cleanBase64.slice(0, 32), 'base64');
+    return {
+      mimeType: detectMimeFromMagicBytes(probeBuf, headerMime || fallbackMime),
+      data: cleanBase64,
+    };
+  }
+
+  // Reject bare URLs that weren't base64-encoded
+  if (/^https?:\/\//i.test(str) || str.startsWith('/')) {
+    throw new Error(
+      'Obraz został przesłany jako adres URL zamiast zakodowanych danych obrazu. Wgraj plik bezpośrednio z dysku.'
+    );
+  }
+
+  // Case 3: Raw base64 string
+  const cleanBase64 = str.replace(/\s+/g, '');
+  if (cleanBase64.length < 16) {
+    throw new Error('Przesłane dane obrazu są zbyt krótkie lub niepoprawne.');
+  }
+  const probeBuf = Buffer.from(cleanBase64.slice(0, 32), 'base64');
+  return {
+    mimeType: detectMimeFromMagicBytes(probeBuf, fallbackMime),
+    data: cleanBase64,
+  };
+}
+
+function parseGeminiJsonSafe<T = Record<string, unknown>>(rawText: string | undefined): T {
+  const cleaned = String(rawText || '{}')
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  return JSON.parse(cleaned) as T;
+}
+
 function isQuotaOrTierError(err: unknown): boolean {
   const raw = err instanceof Error ? err.message : String(err);
   return (
@@ -203,6 +294,43 @@ async function generateContentWithQuotaFallback(
       });
     }
     throw err;
+  }
+}
+
+async function generateVisionContentFast(
+  ai: GoogleGenAI,
+  params: {
+    contents: unknown;
+    config?: Record<string, unknown>;
+    liteThinkingLevel?: ThinkingLevel;
+  }
+): Promise<{ response: Awaited<ReturnType<GoogleGenAI['models']['generateContent']>>; modelUsed: string }> {
+  // Use gemini-3.1-flash-lite first (MINIMAL for general fast OCR, LOW for tighter button bounding boxes),
+  // with automatic fallback to gemini-4-hydrogen (ThinkingLevel.LOW) if unavailable.
+  const thinkingLevel = params.liteThinkingLevel ?? ThinkingLevel.MINIMAL;
+  try {
+    const liteConfig = {
+      ...(params.config || {}),
+      thinkingConfig: { thinkingLevel },
+    };
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.1-flash-lite',
+      contents: params.contents as never,
+      config: liteConfig as never,
+    });
+    return { response, modelUsed: 'gemini-3.1-flash-lite' };
+  } catch (liteErr) {
+    console.warn('[Vision] gemini-3.1-flash-lite fallback -> gemini-4-hydrogen:', liteErr instanceof Error ? liteErr.message : String(liteErr));
+    const hydrogenConfig = {
+      ...(params.config || {}),
+      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+    };
+    const response = await ai.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents: params.contents as never,
+      config: hydrogenConfig as never,
+    });
+    return { response, modelUsed: 'gemini-4-hydrogen' };
   }
 }
 
@@ -1309,18 +1437,23 @@ Zasady:
             | { inlineData: { mimeType: string; data: string } }
           > = [];
 
+          let hasInlineImage = false;
           if (rawBase64 && inlineSupportedMimes.has(rawMimeType)) {
-            const cleanedBase64 = rawBase64.includes(',')
-              ? rawBase64.split(',')[1] || rawBase64
-              : rawBase64;
-            const normalizedMime =
-              rawMimeType === 'image/jpg' ? 'image/jpeg' : rawMimeType;
-            parts.push({
-              inlineData: {
-                mimeType: normalizedMime,
-                data: cleanedBase64,
-              },
-            });
+            if (rawMimeType.startsWith('image/')) {
+              const imgPart = resolveInlineImagePart(rawBase64, rawMimeType);
+              parts.push({ inlineData: imgPart });
+              hasInlineImage = true;
+            } else {
+              const cleanedBase64 = rawBase64.includes(',')
+                ? rawBase64.split(',')[1] || rawBase64
+                : rawBase64;
+              parts.push({
+                inlineData: {
+                  mimeType: rawMimeType,
+                  data: cleanedBase64,
+                },
+              });
+            }
           }
 
           const targetScopeLabel =
@@ -1361,17 +1494,11 @@ Zasady:
 
           parts.push({ text: promptLines.join('\n') });
 
-          const response = await generateContentWithQuotaFallback(
-            ai,
-            'gemini-4-hydrogen',
-            {
-              contents: { parts },
-              config: {
-                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-                systemInstruction:
-                  'Jesteś głównym architektem systemów webowych i projektantem UI/UX w Aether Tactile Studio. Z każdego wgranego dokumentu (briefu PDF, makiety UI, pliku Markdown, JSON, CSV lub kodu) wydobywasz konkretną domenę biznesową i tworzysz precyzyjny plan ekranów oraz inżynieryjną matrycę budowy strony internetowej i aplikacji internetowej.',
-                responseMimeType: 'application/json',
-                responseSchema: {
+          const fromFileCallConfig = {
+            systemInstruction:
+              'Jesteś głównym architektem systemów webowych i projektantem UI/UX w Aether Tactile Studio. Z każdego wgranego dokumentu (briefu PDF, makiety UI, pliku Markdown, JSON, CSV lub kodu) wydobywasz konkretną domenę biznesową i tworzysz precyzyjny plan ekranów oraz inżynieryjną matrycę budowy strony internetowej i aplikacji internetowej.',
+            responseMimeType: 'application/json',
+            responseSchema: {
                 type: Type.OBJECT,
                 properties: {
                   projectTitle: { type: Type.STRING },
@@ -1511,12 +1638,32 @@ Zasady:
                   'masterBuildPrompt',
                 ],
               },
-            },
-          });
+            };
 
-          const parsed = JSON.parse(
-            (response.text ?? '{}').trim()
-          ) as GeneratedFilePlanPayload;
+          let response;
+          let usedModelLabel = 'Gemini 4 Hydrogen (Multimodal)';
+          if (hasInlineImage) {
+            const visionRes = await generateVisionContentFast(ai, {
+              contents: { parts },
+              config: fromFileCallConfig,
+            });
+            response = visionRes.response;
+            usedModelLabel = `Gemini Vision (${visionRes.modelUsed})`;
+          } else {
+            response = await generateContentWithQuotaFallback(
+              ai,
+              'gemini-4-hydrogen',
+              {
+                contents: { parts },
+                config: {
+                  ...fromFileCallConfig,
+                  thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                },
+              }
+            );
+          }
+
+          const parsed = parseGeminiJsonSafe<GeneratedFilePlanPayload>(response.text);
           if (
             parsed &&
             Array.isArray(parsed.screens) &&
@@ -1525,7 +1672,7 @@ Zasady:
             Array.isArray(parsed.webAppMatrix)
           ) {
             aiPlan = parsed;
-            generatedByModel = 'Gemini 4 Hydrogen (Multimodal)';
+            generatedByModel = usedModelLabel;
           }
         } catch {
           // Seamlessly fall back to deterministic document & UI image architect below on 429/403/parse issues
@@ -2264,7 +2411,7 @@ Paleta: ${palette}, Materiał dotyku: ${material}, Głębia cieni: ${JSON.string
     }
   });
 
-  // 3. Analyze Uploaded Photo with automatic quota fallback
+  // 3. Analyze Uploaded Photo / UI Graphic with Real Multimodal Vision Recognition
   app.post('/api/gemini/analyze-image', async (req, res) => {
     const { imageBase64, mimeType, question } = req.body || {};
     if (!imageBase64) {
@@ -2272,86 +2419,438 @@ Paleta: ${palette}, Materiał dotyku: ${material}, Głębia cieni: ${JSON.string
     }
     try {
       if (!process.env.GEMINI_API_KEY) {
-        throw new Error('NO_KEY_USE_LOCAL');
+        return res.status(503).json({
+          error:
+            'Brak skonfigurowanego klucza GEMINI_API_KEY po stronie serwera. Sprawdź Settings > Secrets lub włącz Tryb Zero-Limit.',
+        });
       }
       const ai = getGenAIClient();
+      const imageInline = resolveInlineImagePart(imageBase64, mimeType || 'image/jpeg');
 
-      const cleanBase64 = String(imageBase64).replace(/^data:[^;]+;base64,/, '');
-      const response = await generateContentWithQuotaFallback(
-        ai,
-        'gemini-4-hydrogen',
-        {
-          contents: {
-            parts: [
-              {
-                inlineData: {
-                  mimeType: mimeType || 'image/jpeg',
-                  data: cleanBase64,
-                },
+      const { response, modelUsed } = await generateVisionContentFast(ai, {
+        contents: {
+          parts: [
+            { inlineData: imageInline },
+            {
+              text:
+                question ||
+                'Dokładnie rozpoznaj co znajduje się na tym obrazie / grafice UI. Opisz po polsku konkretne widoczne obiekty, sekcje interfejsu, przyciski i napisy odczytane z obrazu (nie wymyślaj niczego, czego nie ma na grafice). Podaj listę rozpoznanych elementów (recognizedElements), widocznych napisów (recognizedTexts), 3-5 dominujących kolorów HEX (detectedColors), sugerowany materiał haptyczny (shiny-glass, frosted-glass, matte-metal, abs-plastic, suede), twardość (0-100), rozmycie szkła (6-36), elewację cienia (4-40) oraz gotowy prompt odtwarzający ten konkretny obraz.',
+            },
+          ],
+        },
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              summary: { type: Type.STRING },
+              recognizedElements: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
               },
-              {
-                text:
-                  question ||
-                  'Przeanalizuj ten projekt UI/obraz pod kątem głębi cieni, rozmycia szkła matowego, palety kolorów, sugerowanego materiału haptycznego (shiny-glass, frosted-glass, matte-metal, suede), twardości materiału (0-100) oraz podaj gotowy prompt odtwarzający ten styl.',
+              recognizedTexts: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
               },
+              detectedColors: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+              },
+              suggestedMaterial: { type: Type.STRING },
+              suggestedHardness: { type: Type.INTEGER },
+              suggestedGlassBlur: { type: Type.INTEGER },
+              suggestedElevation: { type: Type.INTEGER },
+              extractedPrompt: { type: Type.STRING },
+            },
+            required: [
+              'summary',
+              'recognizedElements',
+              'recognizedTexts',
+              'detectedColors',
+              'suggestedMaterial',
+              'suggestedHardness',
+              'suggestedGlassBlur',
+              'suggestedElevation',
+              'extractedPrompt',
             ],
           },
-          config: {
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                summary: { type: Type.STRING },
-                suggestedMaterial: { type: Type.STRING },
-                suggestedHardness: { type: Type.INTEGER },
-                suggestedGlassBlur: { type: Type.INTEGER },
-                suggestedElevation: { type: Type.INTEGER },
-                extractedPrompt: { type: Type.STRING },
-              },
-              required: [
-                'summary',
-                'suggestedMaterial',
-                'suggestedHardness',
-                'suggestedGlassBlur',
-                'suggestedElevation',
-                'extractedPrompt',
-              ],
-            },
-          },
-        }
-      );
-
-      const parsed = JSON.parse((response.text ?? '{}').trim());
-      res.json(parsed);
-    } catch {
-      res.json({
-        summary:
-          'Wykryto wielowarstwową architekturę interfejsu z wyraźną hierarchią kart, subtelnym rozmyciem tła i kontrastowymi punktami akcji (analiza lokalna Zero-Limit).',
-        suggestedMaterial: 'frosted-glass',
-        suggestedHardness: 78,
-        suggestedGlassBlur: 22,
-        suggestedElevation: 18,
-        extractedPrompt:
-          'Clean architectural 1440px desktop UI with frosted optical glass cards, crisp Fresnel top rim highlights, balanced 60-30-10 neutral palette, and high-contrast interactive controls.',
+        },
       });
+
+      const parsed = parseGeminiJsonSafe<Record<string, unknown>>(response.text);
+      res.json({
+        ...parsed,
+        modelUsed,
+      });
+    } catch (error) {
+      const formatted = formatGeminiError(error);
+      res.status(formatted.status).json({ error: formatted.message });
     }
   });
 
-  // 4. Create & Edit High-Quality Images (gemini-nano-banana-2.1 & gemini-3-pro-image-preview, 1K/2K/4K, all aspect ratios)
+  // 3b. Analyze Uploaded Frontend Image for Real Visual Recognition, High-Precision Button Detection & Prompt Synthesis
+  app.post('/api/gemini/analyze-frontend-buttons', async (req, res) => {
+    const { imageBase64, mimeType, fileName, userPrompt } = req.body || {};
+    if (!imageBase64) {
+      return res.status(400).json({ error: 'Brak obrazu frontendu do analizy przycisków.' });
+    }
+    const cleanUserPrompt = String(userPrompt || '').trim();
+    try {
+      if (!process.env.GEMINI_API_KEY) {
+        return res.status(503).json({
+          error:
+            'Brak skonfigurowanego klucza GEMINI_API_KEY po stronie serwera. Skonfiguruj klucz w Settings > Secrets lub włącz Tryb Zero-Limit (Lokalny).',
+        });
+      }
+      const ai = getGenAIClient();
+      const imageInline = resolveInlineImagePart(imageBase64, mimeType || 'image/jpeg');
+
+      const userPromptContextBlock = cleanUserPrompt
+        ? `\nKONTEKST I PROMPT UŻYTKOWNIKA DLA TEJ GRAFIKI (uwzględnij go przy identyfikacji funkcji przycisków, nazewnictwie i generowaniu nowego promptu):\n"""\n${cleanUserPrompt.slice(
+            0,
+            2400
+          )}\n"""\n`
+        : '';
+
+      const analysisInstruction = `Przeanalizuj skrupulatnie dostarczoną grafikę UI (plik: ${String(
+        fileName || 'frontend-ui.jpg'
+      )}) z najwyższą precyzją przestrzenną w celu wykrycia WSZYSTKICH klikalnych przycisków i elementów interaktywnych.${userPromptContextBlock}
+ZASADY KRYTYCZNE ROZPOZNAWANIA PRZYCISKÓW:
+1. Przeskanuj CAŁY obraz od góry do dołu i od lewej do prawej (jeśli grafika zawiera kilka ekranów/makiet obok siebie, przeskanuj KAŻDY widoczny ekran).
+2. Wykryj KAŻDY klikalny element interaktywny (maks. 24 elementy):
+   - przyciski główne CTA (np. "Rozpocznij analizę", "Dalej", "Zapisz", "Kup"),
+   - przyciski drugorzędne, kafelki wyboru / chipy / opcje formularza,
+   - zakładki nawigacyjne i elementy dolnego paska (bottom nav / tabs),
+   - przyciski ikonowe (wstecz "<", zamknij "X", menu hamburger, szukaj, profil, ustawienia, udostępnij),
+   - przełączniki (toggle), checkboxy, pola wyboru, suwaki (slider) oraz fizyczne pokrętła/klawisze jeśli obraz przedstawia panel sprzętowy.
+3. RAMKA box2d = [ymin, xmin, ymax, xmax] w skali 0..1000 MUSI ściśle otaczać WYŁĄCZNIE sam klikalny przycisk/kontrolkę!
+   - ZAKAZ zaznaczania całego ekranu telefonu, całej karty z tekstem lub tła zamiast konkretnego przycisku.
+   - Nie duplikuj tego samego przycisku dwa razy.
+   - Zawsze odczytuj PRAWDZIWY tekst z przycisku (OCR) lub podaj konkretny opis ikony (np. "Ikona wstecz", "Zakładka Profil").
+4. Jeśli na grafice faktycznie nie ma żadnych przycisków ani kontrolek, zwróć pustą tablicę detectedButtons i buttonCount: 0.
+
+Wypełnij pola JSON:
+- imageDescription: dokładny opis po polsku co przedstawia grafika (ekrany, domena, układ, kolorystyka, styl).
+- recognizedTexts: maks. 16 najważniejszych napisów/etykiet faktycznie odczytanych z obrazu.
+- detectedColors: 3 do 5 dominujących kolorów HEX (np. "#0F172A").
+- detectedButtons: tablica do 24 wykrytych kontrolek. Każda zawiera:
+  - label: dokładny napis odczytany z przycisku lub konkretny opis ikony/kontrolki
+  - role: 'primary-cta' | 'secondary-action' | 'nav-tab' | 'toggle-slider' | 'icon-control'
+  - zone: 'header' (górna nawigacja/nagłówek ekranu) | 'main' (treść/formularze/akcje główne) | 'footer' (dolny pasek akcji/nawigacji)
+  - box2d: [ymin, xmin, ymax, xmax] w skali 0..1000 ściśle wokół danego przycisku
+- buttonCount, headerButtons, mainButtons, footerButtons: liczby dokładnie zgodne z detectedButtons.
+- layoutSummary: zwięzłe podsumowanie struktury i interaktywności po polsku.
+- detectedTheme: konkretna nazwa rozpoznanego stylu/tematyki po polsku.
+- suggestedMaterial ('shiny-glass' | 'frosted-glass' | 'matte-metal' | 'abs-plastic' | 'suede'), suggestedHardness (0-100), suggestedGlassBlur (6-36), suggestedElevation (4-40).
+- generatedImagePrompt: kompletny, szczegółowy prompt graficzny łączący rozpoznany wygląd obrazu z wytycznymi promptu użytkownika oraz dokładną listą wykrytych przycisków.`;
+
+      const { response, modelUsed } = await generateVisionContentFast(ai, {
+        liteThinkingLevel: ThinkingLevel.LOW,
+        contents: {
+          parts: [{ inlineData: imageInline }, { text: analysisInstruction }],
+        },
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              imageDescription: { type: Type.STRING },
+              recognizedTexts: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+              },
+              detectedColors: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+              },
+              buttonCount: { type: Type.INTEGER },
+              headerButtons: { type: Type.INTEGER },
+              mainButtons: { type: Type.INTEGER },
+              footerButtons: { type: Type.INTEGER },
+              layoutSummary: { type: Type.STRING },
+              detectedTheme: { type: Type.STRING },
+              suggestedMaterial: { type: Type.STRING },
+              suggestedHardness: { type: Type.INTEGER },
+              suggestedGlassBlur: { type: Type.INTEGER },
+              suggestedElevation: { type: Type.INTEGER },
+              generatedImagePrompt: { type: Type.STRING },
+              detectedButtons: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    label: { type: Type.STRING },
+                    role: { type: Type.STRING },
+                    zone: { type: Type.STRING },
+                    box2d: {
+                      type: Type.ARRAY,
+                      items: { type: Type.INTEGER },
+                    },
+                  },
+                  required: ['label', 'role', 'zone', 'box2d'],
+                },
+              },
+            },
+            required: [
+              'imageDescription',
+              'recognizedTexts',
+              'detectedColors',
+              'buttonCount',
+              'headerButtons',
+              'mainButtons',
+              'footerButtons',
+              'layoutSummary',
+              'detectedTheme',
+              'suggestedMaterial',
+              'suggestedHardness',
+              'suggestedGlassBlur',
+              'suggestedElevation',
+              'generatedImagePrompt',
+              'detectedButtons',
+            ],
+          },
+        },
+      });
+
+      const parsed = parseGeminiJsonSafe<{
+        imageDescription?: string;
+        recognizedTexts?: string[];
+        detectedColors?: string[];
+        buttonCount?: number;
+        headerButtons?: number;
+        mainButtons?: number;
+        footerButtons?: number;
+        layoutSummary?: string;
+        detectedTheme?: string;
+        suggestedMaterial?: string;
+        suggestedHardness?: number;
+        suggestedGlassBlur?: number;
+        suggestedElevation?: number;
+        generatedImagePrompt?: string;
+        detectedButtons?: Array<{
+          label?: string;
+          role?: string;
+          zone?: string;
+          box2d?: number[];
+          xPct?: number;
+          yPct?: number;
+          wPct?: number;
+          hPct?: number;
+        }>;
+      }>(response.text);
+
+      const shadeOrder = ['cobalt', 'emerald', 'amber', 'violet', 'rose', 'cyan'];
+      const validRoles = [
+        'primary-cta',
+        'secondary-action',
+        'nav-tab',
+        'toggle-slider',
+        'icon-control',
+      ];
+      const validZones = ['header', 'main', 'footer'];
+      const validMaterials = [
+        'shiny-glass',
+        'frosted-glass',
+        'matte-metal',
+        'abs-plastic',
+        'suede',
+      ];
+
+      const rawButtons = Array.isArray(parsed.detectedButtons)
+        ? parsed.detectedButtons.slice(0, 24)
+        : [];
+
+      interface NormalizedBoxBtn {
+        id: string;
+        label: string;
+        role: string;
+        zone: string;
+        xPct: number;
+        yPct: number;
+        wPct: number;
+        hPct: number;
+        shadeId: string;
+        confirmed: boolean;
+        source: 'ai';
+      }
+
+      const calcIoU = (a: NormalizedBoxBtn, b: NormalizedBoxBtn): number => {
+        const x1 = Math.max(a.xPct, b.xPct);
+        const y1 = Math.max(a.yPct, b.yPct);
+        const x2 = Math.min(a.xPct + a.wPct, b.xPct + b.wPct);
+        const y2 = Math.min(a.yPct + a.hPct, b.yPct + b.hPct);
+        const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+        if (inter <= 0) return 0;
+        const areaA = a.wPct * a.hPct;
+        const areaB = b.wPct * b.hPct;
+        return inter / Math.max(0.0001, areaA + areaB - inter);
+      };
+
+      const detectedButtons: NormalizedBoxBtn[] = [];
+      const tsNow = Date.now();
+
+      for (let idx = 0; idx < rawButtons.length; idx++) {
+        const btn = rawButtons[idx];
+        let xPct = 8 + (idx % 3) * 28;
+        let yPct = 12 + Math.floor(idx / 3) * 22;
+        let wPct = 18;
+        let hPct = 8;
+
+        if (Array.isArray(btn?.box2d) && btn.box2d.length === 4) {
+          const [yminRaw, xminRaw, ymaxRaw, xmaxRaw] = btn.box2d.map((n) => Number(n) || 0);
+          // Handle both 0..1000 native Gemini coordinates and accidental 0..100 coordinates
+          const scale = Math.max(yminRaw, xminRaw, ymaxRaw, xmaxRaw) > 100 ? 10 : 1;
+          const y1 = Math.max(0, Math.min(97, yminRaw / scale));
+          const x1 = Math.max(0, Math.min(97, xminRaw / scale));
+          const y2 = Math.max(y1 + 2.5, Math.min(100, ymaxRaw / scale));
+          const x2 = Math.max(x1 + 2.5, Math.min(100, xmaxRaw / scale));
+          xPct = Number(x1.toFixed(1));
+          yPct = Number(y1.toFixed(1));
+          wPct = Number(Math.max(2.5, Math.min(100 - xPct, x2 - x1)).toFixed(1));
+          hPct = Number(Math.max(2.5, Math.min(100 - yPct, y2 - y1)).toFixed(1));
+        } else if (typeof btn?.xPct === 'number') {
+          xPct = Math.max(0.5, Math.min(95, Number(btn.xPct)));
+          yPct = Math.max(0.5, Math.min(95, Number(btn.yPct) || 10));
+          wPct = Math.max(3, Math.min(100 - xPct, Number(btn.wPct) || 18));
+          hPct = Math.max(3, Math.min(100 - yPct, Number(btn.hPct) || 8));
+        }
+
+        // Skip degenerate full-canvas wrappers (>82% area unless it's a single standalone physical control)
+        if (wPct * hPct > 7200 && rawButtons.length > 1) {
+          continue;
+        }
+
+        const inferredZone = validZones.includes(String(btn?.zone))
+          ? String(btn.zone)
+          : yPct < 18
+            ? 'header'
+            : yPct > 78
+              ? 'footer'
+              : 'main';
+
+        const candidate: NormalizedBoxBtn = {
+          id: `btn_ai_${tsNow}_${detectedButtons.length}`,
+          label: String(btn?.label || `Przycisk #${detectedButtons.length + 1}`)
+            .trim()
+            .slice(0, 64),
+          role: validRoles.includes(String(btn?.role))
+            ? String(btn.role)
+            : detectedButtons.length === 0
+              ? 'primary-cta'
+              : 'secondary-action',
+          zone: inferredZone,
+          xPct,
+          yPct,
+          wPct,
+          hPct,
+          shadeId: shadeOrder[detectedButtons.length % shadeOrder.length],
+          confirmed: false,
+          source: 'ai',
+        };
+
+        // Deduplicate near-identical overlapping boxes (IoU > 0.65)
+        const isDuplicate = detectedButtons.some((existing) => calcIoU(existing, candidate) > 0.65);
+        if (!isDuplicate) {
+          detectedButtons.push(candidate);
+        }
+      }
+
+      // Compute mathematically consistent totals directly from deduplicated detectedButtons
+      const headerCount = detectedButtons.filter((b) => b.zone === 'header').length;
+      const mainCount = detectedButtons.filter((b) => b.zone === 'main').length;
+      const footerCount = detectedButtons.filter((b) => b.zone === 'footer').length;
+      const totalCount = detectedButtons.length;
+
+      const recognizedTexts = Array.isArray(parsed.recognizedTexts)
+        ? parsed.recognizedTexts
+            .map((t) => String(t || '').trim())
+            .filter(Boolean)
+            .slice(0, 16)
+        : [];
+
+      const detectedColors = Array.isArray(parsed.detectedColors)
+        ? parsed.detectedColors
+            .map((c) => String(c || '').trim())
+            .filter((c) => /^#[0-9a-fA-F]{3,8}$/.test(c))
+            .slice(0, 5)
+        : [];
+
+      res.json({
+        buttonCount: totalCount,
+        headerButtons: headerCount,
+        mainButtons: mainCount,
+        footerButtons: footerCount,
+        detectedButtons,
+        imageDescription: String(
+          parsed.imageDescription ||
+            parsed.layoutSummary ||
+            `Rozpoznano grafikę „${String(fileName || 'frontend')}”.`
+        ),
+        recognizedTexts,
+        detectedColors,
+        layoutSummary: String(
+          parsed.layoutSummary ||
+            parsed.imageDescription ||
+            `Wykryto ${totalCount} elementów przyciskowych i kontrolek.`
+        ),
+        detectedTheme: String(parsed.detectedTheme || 'Rozpoznany styl wizualny'),
+        suggestedMaterial: validMaterials.includes(String(parsed.suggestedMaterial))
+          ? String(parsed.suggestedMaterial)
+          : 'frosted-glass',
+        suggestedHardness: Math.max(
+          0,
+          Math.min(100, Math.round(Number(parsed.suggestedHardness) || 74))
+        ),
+        suggestedGlassBlur: Math.max(
+          6,
+          Math.min(36, Math.round(Number(parsed.suggestedGlassBlur) || 20))
+        ),
+        suggestedElevation: Math.max(
+          4,
+          Math.min(40, Math.round(Number(parsed.suggestedElevation) || 18))
+        ),
+        generatedImagePrompt: String(
+          parsed.generatedImagePrompt ||
+            `High-resolution 1440px UI design preserving ${totalCount} interactive controls and exact visual style from the uploaded reference.`
+        ),
+        userGraphicPrompt: cleanUserPrompt || undefined,
+        analyzedAt: new Date().toLocaleTimeString('pl-PL', {
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+        sourceEngine: 'gemini',
+        modelUsed,
+      });
+    } catch (error) {
+      const formatted = formatGeminiError(error);
+      res.status(formatted.status).json({ error: formatted.message });
+    }
+  });
+
+  // 4. Create & Edit High-Quality Images (supports base frontend image + up to 5 style/depth/theme reference images + website build guidelines)
   app.post('/api/gemini/generate-image', async (req, res) => {
     try {
       const {
         prompt,
-        aspectRatio = '1:1',
+        websiteGuidelines,
+        detectedButtonCount,
+        aspectRatio = '16:9',
         imageSize = '1K',
         model = 'gemini-nano-banana-2.1',
         sourceImageBase64,
         sourceMimeType,
+        styleReferenceImages,
       } = req.body;
 
       if (!prompt) {
         return res.status(400).json({ error: 'Wprowadź opis obrazu (prompt).' });
+      }
+
+      if (!process.env.GEMINI_API_KEY) {
+        return res.status(503).json({
+          error:
+            'Brak skonfigurowanego klucza GEMINI_API_KEY po stronie serwera. Skonfiguruj klucz w Settings > Secrets lub włącz Tryb Zero-Limit (Lokalny).',
+        });
       }
 
       const ai = getGenAIClient();
@@ -2359,37 +2858,102 @@ Paleta: ${palette}, Materiał dotyku: ${material}, Głębia cieni: ${JSON.string
         { text: string } | { inlineData: { data: string; mimeType: string } }
       > = [];
 
+      const refLabels: string[] = [];
+
       if (sourceImageBase64) {
-        const cleanBase64 = String(sourceImageBase64).replace(/^data:[^;]+;base64,/, '');
-        parts.push({
-          inlineData: {
-            data: cleanBase64,
-            mimeType: sourceMimeType || 'image/png',
-          },
-        });
+        try {
+          const sourcePart = resolveInlineImagePart(
+            sourceImageBase64,
+            sourceMimeType || 'image/jpeg'
+          );
+          parts.push({ inlineData: sourcePart });
+          refLabels.push(
+            'Obraz #1 (BAZOWY UKŁAD FRONTENDU): zachowaj strukturę sekcji, hierarchię informacji oraz rozmieszczenie przycisków.'
+          );
+        } catch {
+          // Ignore unreadable optional base source image
+        }
       }
-      parts.push({ text: String(prompt) });
+
+      const safeStyleRefs = Array.isArray(styleReferenceImages)
+        ? styleReferenceImages.slice(0, 5)
+        : [];
+      safeStyleRefs.forEach(
+        (
+          ref: { base64?: string; mimeType?: string; role?: string; name?: string },
+          idx: number
+        ) => {
+          if (!ref?.base64) return;
+          try {
+            const refPart = resolveInlineImagePart(
+              ref.base64,
+              ref.mimeType || 'image/jpeg'
+            );
+            parts.push({ inlineData: refPart });
+            const num = (sourceImageBase64 ? 2 : 1) + idx;
+            refLabels.push(
+              `Obraz #${num} (REFERENCJA — ${String(ref.role || 'styl-obrazu')} · ${String(
+                ref.name || `grafika-${idx + 1}`
+              )}): przejmij z niego paletę, głębię światła, fakturę materiału i tematykę.`
+            );
+          } catch {
+            // Skip invalid reference entry
+          }
+        }
+      );
+
+      const promptSegments: string[] = [String(prompt).trim()];
+      if (Number.isFinite(Number(detectedButtonCount)) && Number(detectedButtonCount) > 0) {
+        promptSegments.push(
+          `WYMAGANA LICZBA PRZYCISKÓW I KONTROLEK: zachowaj czytelny układ około ${Math.round(
+            Number(detectedButtonCount)
+          )} przycisków i elementów interaktywnych z wyraźnymi strefami nagłówka, treści głównej i akcji.`
+        );
+      }
+      if (websiteGuidelines && String(websiteGuidelines).trim()) {
+        promptSegments.push(
+          `WYTYCZNE BUDOWY STRONY / FRONTENDU:\n${String(websiteGuidelines).trim()}`
+        );
+      }
+      if (refLabels.length > 0) {
+        promptSegments.push(
+          `ROLE ZAŁĄCZONYCH OBRAZÓW REFERENCYJNYCH (${refLabels.length}):\n${refLabels.join(
+            '\n'
+          )}`
+        );
+      }
+
+      parts.push({ text: promptSegments.join('\n\n') });
 
       const runImageGen = async (targetModel: string) => {
+        const isLiteModel = targetModel === 'gemini-3.1-flash-lite-image';
         return ai.models.generateContent({
           model: targetModel,
           contents: { parts },
           config: {
-            imageConfig: {
-              aspectRatio: String(aspectRatio),
-              imageSize: String(imageSize),
-            },
+            imageConfig: isLiteModel
+              ? { aspectRatio: String(aspectRatio) }
+              : {
+                  aspectRatio: String(aspectRatio),
+                  imageSize: String(imageSize),
+                },
           },
         });
       };
 
+      const requestedModel = String(model);
       let response;
       try {
-        response = await runImageGen(String(model));
+        response = await runImageGen(requestedModel);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        if (String(model) === 'gemini-3-pro-image-preview' && msg.includes('404')) {
+        if (requestedModel === 'gemini-3-pro-image-preview' && msg.includes('404')) {
           response = await runImageGen('gemini-3-pro-image');
+        } else if (
+          requestedModel !== 'gemini-3.1-flash-lite-image' &&
+          (msg.includes('404') || msg.includes('not found'))
+        ) {
+          response = await runImageGen('gemini-3.1-flash-lite-image');
         } else {
           throw err;
         }
@@ -2409,11 +2973,15 @@ Paleta: ${palette}, Materiał dotyku: ${material}, Głębia cieni: ${JSON.string
 
       if (!imageUrl) {
         return res.status(500).json({
-          error: 'Model nie zwrócił danych obrazu. Spróbuj doprecyzować opis.',
+          error: 'Model nie zwrócił danych obrazu. Spróbuj doprecyzować opis lub wytyczne.',
         });
       }
 
-      res.json({ imageUrl, notes });
+      res.json({
+        imageUrl,
+        notes,
+        usedStyleReferencesCount: safeStyleRefs.length,
+      });
     } catch (error) {
       const formatted = formatGeminiError(error);
       res.status(formatted.status).json({ error: formatted.message });

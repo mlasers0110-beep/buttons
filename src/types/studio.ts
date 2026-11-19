@@ -1672,4 +1672,63 @@ export interface ActiveModifiedElementState {
   updatedAtMs: number;
 }
 
+export type DetectedFrontendButtonRole =
+  | 'primary-cta'
+  | 'secondary-action'
+  | 'nav-tab'
+  | 'toggle-slider'
+  | 'icon-control';
+
+export interface DetectedFrontendButton {
+  id: string;
+  label: string;
+  role: DetectedFrontendButtonRole;
+  zone: PrototypeDropZone;
+  xPct: number;
+  yPct: number;
+  wPct: number;
+  hPct: number;
+  shadeId: ElementShadeId;
+  confirmed?: boolean;
+  source?: 'ai' | 'manual';
+}
+
+export interface FrontendImageButtonAnalysis {
+  buttonCount: number;
+  headerButtons: number;
+  mainButtons: number;
+  footerButtons: number;
+  detectedButtons: DetectedFrontendButton[];
+  imageDescription?: string;
+  recognizedTexts?: string[];
+  detectedColors?: string[];
+  userGraphicPrompt?: string;
+  layoutSummary: string;
+  detectedTheme: string;
+  suggestedMaterial: HapticMaterialType;
+  suggestedHardness: number;
+  suggestedGlassBlur: number;
+  suggestedElevation: number;
+  generatedImagePrompt: string;
+  analyzedAt: string;
+  sourceEngine: 'gemini' | 'local-offline';
+  modelUsed?: string;
+}
+
+export type StyleReferenceRole =
+  | 'styl-obrazu'
+  | 'glebia-swiatlo'
+  | 'tematyka-klimat'
+  | 'kompozycja-ui';
+
+export interface FrontendStyleReferenceImage {
+  id: string;
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+  role: StyleReferenceRole;
+  sizeKb: number;
+}
+
+
 

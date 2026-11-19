@@ -33,7 +33,9 @@ import {
   ExternalPluginIntegrationKind,
   FileBuildTargetType,
   FileUploadPlanRequestPayload,
+  FrontendImageButtonAnalysis,
   FrontendImageRegion,
+  FrontendStyleReferenceImage,
   GeneratedCompleteElement,
   GitHubRepoProfileMetadata,
   GroupOverrideConfig,
@@ -47,6 +49,7 @@ import {
   PromptGraphicRole,
   PromptReferenceGraphic,
   PrototypeDropZone,
+  PrototypeScreenWidget,
   ROTARY_DRIVER_FACTORY_PROFILES,
   RenderPresetItem,
   RotaryDriverCalibrationConfig,
@@ -57,6 +60,7 @@ import {
   StudioMediaItem,
   StudioSnapshotRecord,
   StudioSnapshotState,
+  StyleReferenceRole,
   SynthPatchSettings,
   TOP_5_RENDER_PRESETS,
   UploadedFileBuildPlan,
@@ -127,8 +131,12 @@ export interface SavedSynthPreset {
 
 export interface PendingImageGeneratorDraft {
   prompt: string;
+  websiteGuidelines?: string;
   aspectRatio: '16:9' | '9:16' | '4:3' | '1:1';
   screenTitle?: string;
+  sourceImage?: { base64: string; mime: string; name?: string };
+  styleReferences?: FrontendStyleReferenceImage[];
+  detectedButtonCount?: number;
 }
 
 interface StudioContextValue {
@@ -395,6 +403,34 @@ interface StudioContextValue {
     target: Omit<ActiveModifiedElementState, 'updatedAtMs'> | null
   ) => void;
 
+  // Sequential Prepared Frontend Pipeline (Upload + Mandatory Prompt -> AI Analysis & Manual Confirmation -> Generator -> Frontend Work)
+  userGraphicPrompt: string;
+  setUserGraphicPrompt: React.Dispatch<React.SetStateAction<string>>;
+  userGraphicPromptFileName: string | null;
+  setUserGraphicPromptFileName: React.Dispatch<React.SetStateAction<string | null>>;
+  interactiveElementsApproved: boolean;
+  setInteractiveElementsApproved: React.Dispatch<React.SetStateAction<boolean>>;
+  frontendButtonAnalysis: FrontendImageButtonAnalysis | null;
+  setFrontendButtonAnalysis: React.Dispatch<
+    React.SetStateAction<FrontendImageButtonAnalysis | null>
+  >;
+  websiteBuildGuidelines: string;
+  setWebsiteBuildGuidelines: React.Dispatch<React.SetStateAction<string>>;
+  frontendStyleReferences: FrontendStyleReferenceImage[];
+  addFrontendStyleReferences: (items: FrontendStyleReferenceImage[]) => void;
+  removeFrontendStyleReference: (id: string) => void;
+  updateFrontendStyleReferenceRole: (id: string, role: StyleReferenceRole) => void;
+  clearFrontendStyleReferences: () => void;
+  preparedFrontendReady: boolean;
+  setPreparedFrontendReady: React.Dispatch<React.SetStateAction<boolean>>;
+  applyPreparedFrontendToWorkspace: (params: {
+    imageDataUrl: string;
+    fileName?: string;
+    mimeType?: string;
+    promptUsed?: string;
+    analysis?: FrontendImageButtonAnalysis | null;
+  }) => void;
+
   interactionEnergy: number;
   activeHoldLevel: number;
   setActiveHoldLevel: (lvl: number) => void;
@@ -623,6 +659,22 @@ export const StudioProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   >({});
   const [activeModifiedElement, setActiveModifiedElement] =
     useState<ActiveModifiedElementState | null>(null);
+  const [userGraphicPrompt, setUserGraphicPrompt] = useState<string>('');
+  const [userGraphicPromptFileName, setUserGraphicPromptFileName] = useState<string | null>(
+    null
+  );
+  const [interactiveElementsApproved, setInteractiveElementsApproved] =
+    useState<boolean>(false);
+  const [frontendButtonAnalysis, setFrontendButtonAnalysis] =
+    useState<FrontendImageButtonAnalysis | null>(null);
+  const [websiteBuildGuidelines, setWebsiteBuildGuidelines] = useState<string>(
+    'Architektura 1440px, czytelna hierarchia 60-30-10, kontrast WCAG AA, powierzchnie szkła matowego z subtelną krawędzią Fresnela, zero zbędnych kapsułek i przejrzyste strefy przycisków gotowe pod prototypowanie.'
+  );
+  const [frontendStyleReferences, setFrontendStyleReferences] = useState<
+    FrontendStyleReferenceImage[]
+  >([]);
+  const [preparedFrontendReady, setPreparedFrontendReady] =
+    useState<boolean>(false);
 
   const [interactionEnergy, setInteractionEnergy] = useState(0);
   const [activeHoldLevel, setActiveHoldLevel] = useState(0);
@@ -3369,6 +3421,219 @@ export default function FrontendActionFooter() {
     []
   );
 
+  const addFrontendStyleReferences = useCallback(
+    (items: FrontendStyleReferenceImage[]) => {
+      setFrontendStyleReferences((prev) => {
+        const merged = [...prev, ...items].slice(0, 5);
+        return merged;
+      });
+      hapticAudio.triggerPress(synth, haptic, patterns, { pitchSemitones: 2 });
+    },
+    [synth, haptic, patterns]
+  );
+
+  const removeFrontendStyleReference = useCallback(
+    (id: string) => {
+      setFrontendStyleReferences((prev) => prev.filter((item) => item.id !== id));
+      hapticAudio.triggerPress(synth, haptic, patterns);
+    },
+    [synth, haptic, patterns]
+  );
+
+  const updateFrontendStyleReferenceRole = useCallback(
+    (id: string, role: StyleReferenceRole) => {
+      setFrontendStyleReferences((prev) =>
+        prev.map((item) => (item.id === id ? { ...item, role } : item))
+      );
+      hapticAudio.triggerSliderTick(haptic, 0.45);
+    },
+    [haptic]
+  );
+
+  const clearFrontendStyleReferences = useCallback(() => {
+    setFrontendStyleReferences([]);
+  }, []);
+
+  const applyPreparedFrontendToWorkspace = useCallback(
+    (params: {
+      imageDataUrl: string;
+      fileName?: string;
+      mimeType?: string;
+      promptUsed?: string;
+      analysis?: FrontendImageButtonAnalysis | null;
+    }) => {
+      const analysis = params.analysis ?? frontendButtonAnalysis;
+      const shadeOrder: ElementShadeId[] = [
+        'cobalt',
+        'emerald',
+        'amber',
+        'violet',
+        'rose',
+        'cyan',
+      ];
+
+      const regions: FrontendImageRegion[] =
+        analysis && analysis.detectedButtons.length > 0
+          ? analysis.detectedButtons.map((btn, idx) => ({
+              id: `reg_prep_${Date.now()}_${idx}`,
+              label: btn.label,
+              zone: btn.zone,
+              xPct: btn.xPct,
+              yPct: btn.yPct,
+              wPct: btn.wPct,
+              hPct: btn.hPct,
+              shadeId: btn.shadeId || shadeOrder[idx % shadeOrder.length],
+            }))
+          : [
+              {
+                id: `reg_prep_${Date.now()}_0`,
+                label: 'Górny pasek nawigacji',
+                zone: 'header',
+                xPct: 5,
+                yPct: 4,
+                wPct: 90,
+                hPct: 12,
+                shadeId: 'cobalt',
+              },
+              {
+                id: `reg_prep_${Date.now()}_1`,
+                label: 'Główna sekcja akcji i przycisków',
+                zone: 'main',
+                xPct: 6,
+                yPct: 22,
+                wPct: 88,
+                hPct: 54,
+                shadeId: 'emerald',
+              },
+              {
+                id: `reg_prep_${Date.now()}_2`,
+                label: 'Dolny pasek akcji',
+                zone: 'footer',
+                xPct: 8,
+                yPct: 81,
+                wPct: 84,
+                hPct: 13,
+                shadeId: 'amber',
+              },
+            ];
+
+      const nextWorkingImage: WorkingFrontendImageState = {
+        id: `prep_img_${Date.now()}`,
+        fileName: params.fileName || 'przygotowany-frontend-ai.png',
+        mimeType: params.mimeType || 'image/png',
+        dataUrl: params.imageDataUrl,
+        widthPx: 1280,
+        heightPx: 720,
+        uploadedAt: new Date().toLocaleTimeString('pl-PL', {
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+        notes: params.promptUsed || analysis?.layoutSummary,
+        regions,
+      };
+      setWorkingFrontendImage(nextWorkingImage);
+
+      // Map detected buttons directly into interactive tactile widgets on the active preview screen
+      const targetScreenId =
+        activePreviewScreenId || activeScreenMap.nodes[0]?.id || 'scr-dashboard';
+
+      if (analysis && analysis.detectedButtons.length > 0) {
+        const nextShades: Record<string, ElementShadeId> = {};
+        const interactiveWidgets: PrototypeScreenWidget[] =
+          analysis.detectedButtons.map((btn, idx) => {
+            const instId = `w_ai_${Date.now()}_${idx}`;
+            const shade = btn.shadeId || shadeOrder[idx % shadeOrder.length];
+            nextShades[instId] = shade;
+            const isSlider = btn.role === 'toggle-slider';
+            return {
+              instanceId: instId,
+              catalogId: isSlider
+                ? 'slider-precision-rail'
+                : btn.role === 'primary-cta'
+                  ? 'btn-primary-cta'
+                  : 'btn-glass-card',
+              componentName: isSlider
+                ? 'TactilePrecisionSlider'
+                : btn.role === 'primary-cta'
+                  ? 'TactilePrimaryCTA'
+                  : 'TactileButton',
+              label: btn.label,
+              category: isSlider ? 'sliders' : 'buttons',
+              zone: btn.zone,
+              spanCols: btn.role === 'primary-cta' && btn.zone === 'main' ? 2 : 1,
+              isButtonLike: !isSlider,
+            };
+          });
+
+        setComposedElementShades((prev) => ({ ...prev, ...nextShades }));
+        setActiveScreenMap((prev) => ({
+          ...prev,
+          nodes: prev.nodes.map((node) =>
+            node.id === targetScreenId
+              ? {
+                  ...node,
+                  prototypeWidgets: interactiveWidgets,
+                  components: Array.from(
+                    new Set(interactiveWidgets.map((w) => w.componentName))
+                  ),
+                }
+              : node
+          ),
+        }));
+
+        if (interactiveWidgets[0]) {
+          setActiveModifiedElement({
+            id: interactiveWidgets[0].instanceId,
+            kind: 'widget',
+            label: interactiveWidgets[0].label,
+            zone: interactiveWidgets[0].zone,
+            screenId: targetScreenId,
+            shadeId: nextShades[interactiveWidgets[0].instanceId] || 'cobalt',
+            sourceSurface: 'Przygotowany frontend (Krok 4 — praca interaktywna)',
+            updatedAtMs: Date.now(),
+          });
+        }
+
+        // Apply analyzed optical & material characteristics
+        setHaptic((prev) => ({
+          ...prev,
+          material: analysis.suggestedMaterial,
+          materialHardness: analysis.suggestedHardness,
+        }));
+        setDepth((prev) => ({
+          ...prev,
+          glassBlur: analysis.suggestedGlassBlur,
+          elevation: analysis.suggestedElevation,
+        }));
+      }
+
+      if (params.promptUsed) {
+        setMasterPromptDraft(params.promptUsed);
+      }
+
+      addAttachedPromptGraphic({
+        name: nextWorkingImage.fileName,
+        mimeType: nextWorkingImage.mimeType,
+        dataUrl: nextWorkingImage.dataUrl,
+        role: 'uklad-ekranu',
+      });
+
+      setPreparedFrontendReady(true);
+      hapticAudio.triggerPress(synth, haptic, patterns, { pitchSemitones: 6 });
+      pulseInteraction(1.3);
+    },
+    [
+      frontendButtonAnalysis,
+      activePreviewScreenId,
+      activeScreenMap.nodes,
+      addAttachedPromptGraphic,
+      synth,
+      haptic,
+      patterns,
+      pulseInteraction,
+    ]
+  );
+
   const activeIdentityLabel =
     studioAccount?.displayName ||
     user?.displayName ||
@@ -3513,6 +3778,24 @@ export default function FrontendActionFooter() {
     setElementCustomShade,
     activeModifiedElement,
     markElementAsActivelyModified,
+    userGraphicPrompt,
+    setUserGraphicPrompt,
+    userGraphicPromptFileName,
+    setUserGraphicPromptFileName,
+    interactiveElementsApproved,
+    setInteractiveElementsApproved,
+    frontendButtonAnalysis,
+    setFrontendButtonAnalysis,
+    websiteBuildGuidelines,
+    setWebsiteBuildGuidelines,
+    frontendStyleReferences,
+    addFrontendStyleReferences,
+    removeFrontendStyleReference,
+    updateFrontendStyleReferenceRole,
+    clearFrontendStyleReferences,
+    preparedFrontendReady,
+    setPreparedFrontendReady,
+    applyPreparedFrontendToWorkspace,
     interactionEnergy,
     activeHoldLevel,
     setActiveHoldLevel,

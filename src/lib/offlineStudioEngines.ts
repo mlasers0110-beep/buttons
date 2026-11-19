@@ -2,8 +2,11 @@ import {
   AppScreenMapProject,
   CalibrationTargetCharacter,
   DepthShadowSettings,
+  DetectedFrontendButton,
   DriverCalibrationReport,
+  ElementShadeId,
   FileUploadPlanRequestPayload,
+  FrontendImageButtonAnalysis,
   GeneratedCompleteElement,
   HapticMaterialType,
   HapticSettings,
@@ -674,12 +677,58 @@ export function generatePlanAndMatrixFromFileOffline(
 // ============================================================================
 // 7. Offline Procedural High-DPI Canvas Renderer & Pixel Image Analyzer
 // ============================================================================
+async function sampleDominantRgb(
+  dataUrl?: string
+): Promise<{ r: number; g: number; b: number; lum: number } | null> {
+  if (!dataUrl || typeof document === 'undefined') return null;
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const c = document.createElement('canvas');
+        c.width = 24;
+        c.height = 24;
+        const cx = c.getContext('2d');
+        if (!cx) return resolve(null);
+        cx.drawImage(img, 0, 0, 24, 24);
+        const px = cx.getImageData(0, 0, 24, 24).data;
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        const count = px.length / 4;
+        for (let i = 0; i < px.length; i += 4) {
+          r += px[i];
+          g += px[i + 1];
+          b += px[i + 2];
+        }
+        r = Math.round(r / count);
+        g = Math.round(g / count);
+        b = Math.round(b / count);
+        resolve({ r, g, b, lum: 0.2126 * r + 0.7152 * g + 0.0722 * b });
+      } catch {
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = dataUrl.startsWith('data:') ? dataUrl : `data:image/png;base64,${dataUrl}`;
+  });
+}
+
 export async function generateOfflineProceduralImage(body: {
   prompt?: string;
+  websiteGuidelines?: string;
+  detectedButtonCount?: number;
   aspectRatio?: string;
   imageSize?: string;
-}): Promise<{ imageUrl: string; notes: string }> {
-  const ratio = body.aspectRatio || '1:1';
+  sourceImageBase64?: string;
+  styleReferenceImages?: Array<{
+    base64?: string;
+    mimeType?: string;
+    role?: string;
+    name?: string;
+  }>;
+}): Promise<{ imageUrl: string; notes: string; usedStyleReferencesCount?: number }> {
+  const ratio = String(body.aspectRatio || '16:9');
   let width = 1024;
   let height = 1024;
   if (ratio === '16:9') {
@@ -704,11 +753,55 @@ export async function generateOfflineProceduralImage(body: {
     throw new Error('Brak wsparcia Canvas 2D w przeglądarce.');
   }
 
-  const promptText = String(body.prompt || 'Aether Tactile UI').trim();
-  const isEmerald = /emerald|szmaragd|dark|ciemny/i.test(promptText);
+  const promptText = `${String(body.prompt || 'Aether Tactile UI').trim()} ${String(
+    body.websiteGuidelines || ''
+  ).trim()}`.trim();
+  const styleRefs = Array.isArray(body.styleReferenceImages)
+    ? body.styleReferenceImages.slice(0, 5)
+    : [];
+  const sampledSwatches = (
+    await Promise.all(styleRefs.map((ref) => sampleDominantRgb(ref.base64)))
+  ).filter((s): s is { r: number; g: number; b: number; lum: number } => Boolean(s));
+
+  const avgRefLum =
+    sampledSwatches.length > 0
+      ? sampledSwatches.reduce((acc, s) => acc + s.lum, 0) / sampledSwatches.length
+      : null;
+
+  const isEmerald =
+    (avgRefLum !== null && avgRefLum < 105) ||
+    /emerald|szmaragd|dark|ciemny|nocny/i.test(promptText);
 
   const bgGrad = ctx.createLinearGradient(0, 0, width, height);
-  if (isEmerald) {
+  if (sampledSwatches.length >= 2) {
+    const s0 = sampledSwatches[0];
+    const s1 = sampledSwatches[1];
+    if (isEmerald) {
+      bgGrad.addColorStop(
+        0,
+        `rgb(${Math.round(s0.r * 0.16)}, ${Math.round(s0.g * 0.2)}, ${Math.round(s0.b * 0.22)})`
+      );
+      bgGrad.addColorStop(
+        1,
+        `rgb(${Math.round(s1.r * 0.12)}, ${Math.round(s1.g * 0.18)}, ${Math.round(s1.b * 0.18)})`
+      );
+    } else {
+      bgGrad.addColorStop(
+        0,
+        `rgb(${Math.min(248, 224 + Math.round(s0.r * 0.1))}, ${Math.min(
+          248,
+          226 + Math.round(s0.g * 0.1)
+        )}, ${Math.min(252, 232 + Math.round(s0.b * 0.1))})`
+      );
+      bgGrad.addColorStop(
+        1,
+        `rgb(${Math.min(246, 218 + Math.round(s1.r * 0.12))}, ${Math.min(
+          246,
+          222 + Math.round(s1.g * 0.12)
+        )}, ${Math.min(252, 230 + Math.round(s1.b * 0.12))})`
+      );
+    }
+  } else if (isEmerald) {
     bgGrad.addColorStop(0, '#061512');
     bgGrad.addColorStop(0.5, '#0B251F');
     bgGrad.addColorStop(1, '#081B17');
@@ -720,7 +813,7 @@ export async function generateOfflineProceduralImage(body: {
   ctx.fillStyle = bgGrad;
   ctx.fillRect(0, 0, width, height);
 
-  // Subtle ambient optical caustics
+  // Subtle ambient optical caustics tinted by uploaded style reference images
   const glow = ctx.createRadialGradient(
     width * 0.32,
     height * 0.28,
@@ -731,11 +824,20 @@ export async function generateOfflineProceduralImage(body: {
   );
   glow.addColorStop(
     0,
-    isEmerald ? 'rgba(52, 211, 153, 0.20)' : 'rgba(99, 102, 241, 0.20)'
+    sampledSwatches[0]
+      ? `rgba(${sampledSwatches[0].r}, ${sampledSwatches[0].g}, ${sampledSwatches[0].b}, 0.24)`
+      : isEmerald
+        ? 'rgba(52, 211, 153, 0.20)'
+        : 'rgba(99, 102, 241, 0.20)'
   );
   glow.addColorStop(1, 'rgba(0, 0, 0, 0)');
   ctx.fillStyle = glow;
   ctx.fillRect(0, 0, width, height);
+
+  const targetButtonTotal = Math.max(
+    3,
+    Math.min(12, Math.round(Number(body.detectedButtonCount) || 6))
+  );
 
   const pad = Math.round(Math.min(width, height) * 0.07);
   const frameW = width - pad * 2;
@@ -871,8 +973,8 @@ export async function generateOfflineProceduralImage(body: {
 
   return {
     imageUrl: canvas.toDataURL('image/png'),
-    notes:
-      'Wygenerowano proceduralny render UI wysokiej rozdzielczości przez lokalny silnik Canvas PBR (tryb Offline).',
+    notes: `Wygenerowano przygotowany frontend (${targetButtonTotal} stref przyciskowych, ${styleRefs.length} grafik referencyjnych stylu/głębi) przez lokalny silnik Zero-Limit Canvas PBR.`,
+    usedStyleReferencesCount: styleRefs.length,
   };
 }
 
@@ -966,6 +1068,185 @@ export async function analyzePhotoOffline(body: {
   };
 }
 
+export async function analyzeFrontendButtonsOffline(body: {
+  imageBase64?: string;
+  fileName?: string;
+  userPrompt?: string;
+}): Promise<FrontendImageButtonAnalysis> {
+  const src = String(body.imageBase64 || '');
+  const cleanUserPrompt = String(body.userPrompt || '').trim();
+  const baseAnalysis = await analyzePhotoOffline({ imageBase64: src });
+
+  // Measure high-contrast cell density across header / main / footer bands
+  const bandMetrics = await new Promise<{
+    headerCells: number;
+    mainCells: number;
+    footerCells: number;
+  }>((resolve) => {
+    if (!src || typeof document === 'undefined') {
+      resolve({ headerCells: 2, mainCells: 4, footerCells: 1 });
+      return;
+    }
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const w = 96;
+        const h = 64;
+        const c = document.createElement('canvas');
+        c.width = w;
+        c.height = h;
+        const ctx = c.getContext('2d');
+        if (!ctx) return resolve({ headerCells: 2, mainCells: 4, footerCells: 1 });
+        ctx.drawImage(img, 0, 0, w, h);
+        const data = ctx.getImageData(0, 0, w, h).data;
+
+        const cellContrast = (cx: number, cy: number, cw: number, ch: number) => {
+          let sum = 0;
+          let sq = 0;
+          let n = 0;
+          for (let y = cy; y < cy + ch; y++) {
+            for (let x = cx; x < cx + cw; x++) {
+              const i = (y * w + x) * 4;
+              const lum = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+              sum += lum;
+              sq += lum * lum;
+              n++;
+            }
+          }
+          const avg = sum / Math.max(1, n);
+          return Math.sqrt(Math.max(0, sq / Math.max(1, n) - avg * avg));
+        };
+
+        let headerCells = 0;
+        let mainCells = 0;
+        let footerCells = 0;
+
+        for (let col = 0; col < 6; col++) {
+          if (cellContrast(col * 16, 0, 16, 12) > 18) headerCells++;
+          if (cellContrast(col * 16, 52, 16, 12) > 18) footerCells++;
+        }
+        for (let row = 0; row < 3; row++) {
+          for (let col = 0; col < 4; col++) {
+            if (cellContrast(col * 24, 14 + row * 12, 24, 12) > 22) mainCells++;
+          }
+        }
+
+        resolve({
+          headerCells: Math.max(1, Math.min(4, Math.round(headerCells * 0.65) || 2)),
+          mainCells: Math.max(2, Math.min(6, Math.round(mainCells * 0.55) || 3)),
+          footerCells: Math.max(1, Math.min(3, Math.round(footerCells * 0.5) || 1)),
+        });
+      } catch {
+        resolve({ headerCells: 2, mainCells: 4, footerCells: 1 });
+      }
+    };
+    img.onerror = () => resolve({ headerCells: 2, mainCells: 4, footerCells: 1 });
+    img.src = src.startsWith('data:') ? src : `data:image/png;base64,${src}`;
+  });
+
+  const shadeOrder: ElementShadeId[] = [
+    'cobalt',
+    'emerald',
+    'amber',
+    'violet',
+    'rose',
+    'cyan',
+  ];
+
+  const detectedButtons: DetectedFrontendButton[] = [];
+  const hdrLabels = ['Nawigacja główna', 'Akcja nagłówka CTA', 'Menu sekcji', 'Konto / Profil'];
+  for (let i = 0; i < bandMetrics.headerCells; i++) {
+    detectedButtons.push({
+      id: `btn_off_hdr_${i}`,
+      label: hdrLabels[i % hdrLabels.length],
+      role: i === bandMetrics.headerCells - 1 ? 'primary-cta' : 'nav-tab',
+      zone: 'header',
+      xPct: Math.min(76, 6 + i * Math.round(80 / Math.max(1, bandMetrics.headerCells))),
+      yPct: 4,
+      wPct: Math.min(26, Math.max(15, Math.round(74 / Math.max(1, bandMetrics.headerCells)))),
+      hPct: 10,
+      shadeId: shadeOrder[detectedButtons.length % shadeOrder.length],
+      confirmed: false,
+      source: 'ai',
+    });
+  }
+
+  const mainLabels = [
+    'Przycisk główny Hero CTA',
+    'Karta akcji i parametrów',
+    'Przełącznik trybu / filtr',
+    'Suwak regulacji precyzyjnej',
+    'Przycisk szczegółów widoku',
+    'Panel szybkiego sterowania',
+  ];
+  for (let i = 0; i < bandMetrics.mainCells; i++) {
+    const col = i % 2;
+    const row = Math.floor(i / 2);
+    detectedButtons.push({
+      id: `btn_off_main_${i}`,
+      label: mainLabels[i % mainLabels.length],
+      role: i === 0 ? 'primary-cta' : i % 2 === 1 ? 'toggle-slider' : 'secondary-action',
+      zone: 'main',
+      xPct: col === 0 ? 6 : 52,
+      yPct: Math.min(68, 22 + row * 19),
+      wPct: 40,
+      hPct: 14,
+      shadeId: shadeOrder[detectedButtons.length % shadeOrder.length],
+      confirmed: false,
+      source: 'ai',
+    });
+  }
+
+  const ftrLabels = ['Zapisz i Dalej', 'Eksport / Podgląd', 'Resetuj ustawienia'];
+  for (let i = 0; i < bandMetrics.footerCells; i++) {
+    detectedButtons.push({
+      id: `btn_off_ftr_${i}`,
+      label: ftrLabels[i % ftrLabels.length],
+      role: i === 0 ? 'primary-cta' : 'secondary-action',
+      zone: 'footer',
+      xPct: Math.min(72, 8 + i * 32),
+      yPct: 83,
+      wPct: 26,
+      hPct: 11,
+      shadeId: shadeOrder[detectedButtons.length % shadeOrder.length],
+      confirmed: false,
+      source: 'ai',
+    });
+  }
+
+  const buttonCount = detectedButtons.length;
+  const cleanName = String(body.fileName || 'proponowany-frontend.png');
+
+  return {
+    buttonCount,
+    headerButtons: bandMetrics.headerCells,
+    mainButtons: bandMetrics.mainCells,
+    footerButtons: bandMetrics.footerCells,
+    detectedButtons,
+    imageDescription: cleanUserPrompt
+      ? `Analiza lokalna obrazu „${cleanName}” na podstawie promptu użytkownika: ${cleanUserPrompt.slice(0, 220)}`
+      : `Analiza lokalna obrazu „${cleanName}”.`,
+    layoutSummary: `Wykryto ${buttonCount} przycisków i kontrolek (${bandMetrics.headerCells} w nagłówku, ${bandMetrics.mainCells} w sekcji głównej, ${bandMetrics.footerCells} w pasku dolnym) na obrazie „${cleanName}”. ${baseAnalysis.summary}`,
+    detectedTheme:
+      baseAnalysis.suggestedMaterial === 'matte-metal'
+        ? 'Ciemny interfejs studyjny o wysokim kontraście'
+        : 'Nowoczesny jasny interfejs ze szkłem matowym i wyraźną głębią',
+    suggestedMaterial: baseAnalysis.suggestedMaterial,
+    suggestedHardness: baseAnalysis.suggestedHardness,
+    suggestedGlassBlur: baseAnalysis.suggestedGlassBlur,
+    suggestedElevation: baseAnalysis.suggestedElevation,
+    generatedImagePrompt: `${
+      cleanUserPrompt ? `User brief: ${cleanUserPrompt}. ` : ''
+    }High-resolution 1440px UI design modeled directly on "${cleanName}", preserving exactly ${buttonCount} interactive buttons and controls (${bandMetrics.headerCells} header, ${bandMetrics.mainCells} main, ${bandMetrics.footerCells} footer). ${baseAnalysis.extractedPrompt} Clean spatial hierarchy, WCAG AA legibility, zero clutter, ready for interactive prototyping.`,
+    userGraphicPrompt: cleanUserPrompt || undefined,
+    analyzedAt: new Date().toLocaleTimeString('pl-PL', {
+      hour: '2-digit',
+      minute: '2-digit',
+    }),
+    sourceEngine: 'local-offline',
+  };
+}
+
 const ZERO_LIMIT_LOCAL_MODE_KEY = 'aether_zero_limit_local_mode_v1';
 
 export function getZeroLimitLocalMode(): boolean {
@@ -1000,6 +1281,7 @@ function hasLocalSynthesisEngineForPath(path: string): boolean {
     path === '/api/screen-map/from-file' ||
     path === '/api/gemini/generate-image' ||
     path === '/api/gemini/analyze-image' ||
+    path === '/api/gemini/analyze-frontend-buttons' ||
     path === '/api/gemini/generate-complete-element' ||
     path === '/api/gemini/generate-repo-profile'
   );
@@ -1033,10 +1315,20 @@ export async function studioApiFetch(
   const canTryNetwork =
     !preferLocalZeroLimit && isOnline && (!isFileMode || Boolean(baseOrigin));
 
+  const isVisionRecognitionPath =
+    path === '/api/gemini/analyze-frontend-buttons' ||
+    path === '/api/gemini/analyze-image';
+
   if (canTryNetwork) {
     try {
       const controller = new AbortController();
-      const timeoutMs = path.includes('generate-video') ? 180000 : 22000;
+      const timeoutMs = path.includes('generate-video')
+        ? 180000
+        : isVisionRecognitionPath ||
+            path === '/api/gemini/generate-image' ||
+            path === '/api/screen-map/from-file'
+          ? 65000
+          : 25000;
       const timer = window.setTimeout(() => controller.abort(), timeoutMs);
       const resp = await fetch(`${baseOrigin}${path}`, {
         ...options,
@@ -1049,9 +1341,12 @@ export async function studioApiFetch(
         return resp;
       }
 
-      // If quota / rate limit (429), permission/billing tier (403), timeout (408), or 5xx occurs
-      // on a route backed by our deterministic local synthesis engine, seamlessly synthesize locally
-      // instead of surfacing a blocking "zbyt duża ilość zapytań" error!
+      // For image recognition endpoints when online and Zero-Limit is OFF,
+      // always surface real server errors instead of silently substituting generic offline guesses.
+      if (isVisionRecognitionPath) {
+        return resp;
+      }
+
       const shouldFallbackToLocal =
         hasLocalSynthesisEngineForPath(path) &&
         (resp.status === 429 ||
@@ -1063,8 +1358,20 @@ export async function studioApiFetch(
       if (!shouldFallbackToLocal && resp.status >= 400 && resp.status < 500 && resp.status !== 404) {
         return resp;
       }
-    } catch {
-      // Network unreachable, timed out, or standalone offline mode — seamlessly execute local engine below
+    } catch (err) {
+      // For vision recognition when online and Zero-Limit is OFF, report timeout/network error cleanly
+      if (isVisionRecognitionPath && isOnline && !isFileMode) {
+        const isAbort = err instanceof Error && err.name === 'AbortError';
+        return jsonResponse(
+          {
+            error: isAbort
+              ? 'Przekroczono czas oczekiwania na rozpoznawanie obrazu przez Gemini Vision. Spróbuj ponownie lub zmniejsz rozmiar pliku.'
+              : 'Brak połączenia z serwerem rozpoznawania obrazów. Spróbuj ponownie za chwilę.',
+          },
+          504
+        );
+      }
+      // Network unreachable or standalone offline mode — execute local engine below
     }
   }
 
@@ -1137,8 +1444,14 @@ export async function studioApiFetch(
   if (path === '/api/gemini/generate-image') {
     const generated = await generateOfflineProceduralImage({
       prompt: parsedBody.prompt as string | undefined,
+      websiteGuidelines: parsedBody.websiteGuidelines as string | undefined,
+      detectedButtonCount: parsedBody.detectedButtonCount as number | undefined,
       aspectRatio: parsedBody.aspectRatio as string | undefined,
       imageSize: parsedBody.imageSize as string | undefined,
+      sourceImageBase64: parsedBody.sourceImageBase64 as string | undefined,
+      styleReferenceImages: parsedBody.styleReferenceImages as
+        | Array<{ base64?: string; mimeType?: string; role?: string; name?: string }>
+        | undefined,
     });
     return jsonResponse(generated);
   }
@@ -1146,6 +1459,15 @@ export async function studioApiFetch(
   if (path === '/api/gemini/analyze-image') {
     const analyzed = await analyzePhotoOffline({
       imageBase64: parsedBody.imageBase64 as string | undefined,
+    });
+    return jsonResponse(analyzed);
+  }
+
+  if (path === '/api/gemini/analyze-frontend-buttons') {
+    const analyzed = await analyzeFrontendButtonsOffline({
+      imageBase64: parsedBody.imageBase64 as string | undefined,
+      fileName: parsedBody.fileName as string | undefined,
+      userPrompt: parsedBody.userPrompt as string | undefined,
     });
     return jsonResponse(analyzed);
   }

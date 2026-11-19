@@ -349,12 +349,17 @@ export async function compressImageDataUrlForApi(
       const longest = Math.max(natW, natH);
       const rawKb = estimateKb(rawDataUrl);
 
-      // Keep small images untouched if already compact and within 1280px
-      if (longest <= maxEdgePx && rawKb <= 190) {
-        const mimeMatch = rawDataUrl.match(/^data:([^;]+);/);
+      // Keep compact JPEG/PNG images untouched if already <= maxEdgePx and <= 180 KB
+      const mimeMatch = rawDataUrl.match(/^data:([^;]+);/);
+      const detectedRawMime = mimeMatch ? mimeMatch[1].toLowerCase() : 'image/jpeg';
+      if (
+        longest <= maxEdgePx &&
+        rawKb <= 180 &&
+        (detectedRawMime === 'image/jpeg' || detectedRawMime === 'image/png')
+      ) {
         resolve({
           dataUrl: rawDataUrl,
-          mimeType: mimeMatch ? mimeMatch[1] : 'image/png',
+          mimeType: detectedRawMime,
           widthPx: natW,
           heightPx: natH,
           compressedSizeKb: rawKb,
@@ -374,7 +379,7 @@ export async function compressImageDataUrlForApi(
         if (!ctx) {
           resolve({
             dataUrl: rawDataUrl,
-            mimeType: 'image/png',
+            mimeType: detectedRawMime,
             widthPx: natW,
             heightPx: natH,
             compressedSizeKb: rawKb,
@@ -385,21 +390,15 @@ export async function compressImageDataUrlForApi(
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
 
-        // Try WebP first (preserves alpha & achieves ~70% smaller base64), fallback to crisp JPEG
+        // Always emit universal crisp JPEG for fast, 100%-compatible Gemini Vision OCR & object recognition
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, outW, outH);
         ctx.drawImage(img, 0, 0, outW, outH);
-        let compressed = canvas.toDataURL('image/webp', quality);
-        let outMime = 'image/webp';
-        if (!compressed.startsWith('data:image/webp')) {
-          ctx.fillStyle = '#F8FAFC';
-          ctx.fillRect(0, 0, outW, outH);
-          ctx.drawImage(img, 0, 0, outW, outH);
-          compressed = canvas.toDataURL('image/jpeg', quality);
-          outMime = 'image/jpeg';
-        }
+        const compressed = canvas.toDataURL('image/jpeg', quality);
 
         resolve({
           dataUrl: compressed,
-          mimeType: outMime,
+          mimeType: 'image/jpeg',
           widthPx: outW,
           heightPx: outH,
           compressedSizeKb: estimateKb(compressed),
@@ -407,7 +406,7 @@ export async function compressImageDataUrlForApi(
       } catch {
         resolve({
           dataUrl: rawDataUrl,
-          mimeType: 'image/png',
+          mimeType: detectedRawMime,
           widthPx: natW,
           heightPx: natH,
           compressedSizeKb: rawKb,
@@ -437,7 +436,7 @@ export async function readImageFileToWorkingState(
   });
 
   const originalSizeKb = Math.max(1, Math.round(file.size / 1024));
-  const optimized = await compressImageDataUrlForApi(rawDataUrl, 1280, 0.82);
+  const optimized = await compressImageDataUrlForApi(rawDataUrl, 1440, 0.9);
 
   return {
     id: `fimg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -460,6 +459,42 @@ export async function createWorkingStateFromAssetUrl(params: {
   title: string;
   src: string;
 }): Promise<WorkingFrontendImageState> {
+  let rawDataUrl = params.src;
+  if (!rawDataUrl.startsWith('data:')) {
+    try {
+      const resp = await fetch(params.src);
+      if (resp.ok) {
+        const blob = await resp.blob();
+        rawDataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || params.src));
+          reader.onerror = () => reject(new Error('Nie udało się odczytać wzorca obrazu.'));
+          reader.readAsDataURL(blob);
+        });
+      }
+    } catch {
+      // Fallback to original URL if fetch fails
+    }
+  }
+
+  if (rawDataUrl.startsWith('data:')) {
+    const optimized = await compressImageDataUrlForApi(rawDataUrl, 1440, 0.9);
+    return {
+      id: `fimg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      fileName: `${params.title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.jpg`,
+      mimeType: optimized.mimeType || 'image/jpeg',
+      dataUrl: optimized.dataUrl,
+      widthPx: optimized.widthPx,
+      heightPx: optimized.heightPx,
+      compressedSizeKb: optimized.compressedSizeKb,
+      uploadedAt: new Date().toLocaleTimeString('pl-PL', {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+      regions: buildDefaultFrontendRegions(),
+    };
+  }
+
   const dims = await new Promise<{ w: number; h: number }>((resolve) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';

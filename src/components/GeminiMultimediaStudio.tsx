@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  Check,
   Film,
   ImagePlus,
   Loader2,
@@ -7,12 +8,14 @@ import {
   PhoneOff,
   ScanEye,
   Sparkles,
+  Trash2,
   Upload,
 } from 'lucide-react';
 import { useStudio } from '../context/StudioContext';
+import { compressImageDataUrlForApi } from '../lib/localDiskWorkspace';
 import { studioApiFetch } from '../lib/offlineStudioEngines';
 import { isRunningAsStandaloneHtmlFile } from '../hooks/usePWAInstall';
-import { HapticMaterialType } from '../types/studio';
+import { HapticMaterialType, StyleReferenceRole } from '../types/studio';
 import { ProgressiveImage } from './ui/ProgressiveImage';
 
 const ASPECT_RATIOS = [
@@ -54,24 +57,37 @@ export const GeminiMultimediaStudio: React.FC = () => {
     addMediaAsset,
     pendingImageGeneratorDraft,
     setPendingImageGeneratorDraft,
+    websiteBuildGuidelines,
+    setWebsiteBuildGuidelines,
+    frontendStyleReferences,
+    addFrontendStyleReferences,
+    removeFrontendStyleReference,
+    updateFrontendStyleReferenceRole,
+    frontendButtonAnalysis,
+    applyPreparedFrontendToWorkspace,
   } = useStudio();
 
   const [loadedFromScreenTitle, setLoadedFromScreenTitle] = useState<string | null>(
     null
   );
+  const [detectedButtonCount, setDetectedButtonCount] = useState<number | null>(
+    frontendButtonAnalysis?.buttonCount ?? null
+  );
+  const [approvedNotice, setApprovedNotice] = useState<string | null>(null);
 
   // Image Create & Edit State
   const [imgPrompt, setImgPrompt] = useState(
     'Makro render szklanego przycisku „Dalej” z iryzującą falą światła pod palcem, perłowe tło, miękkie światło studyjne'
   );
   const [imgModel, setImgModel] = useState<
-    'gemini-nano-banana-2.1' | 'gemini-3-pro-image-preview'
+    'gemini-nano-banana-2.1' | 'gemini-3.1-flash-lite-image' | 'gemini-3-pro-image-preview'
   >('gemini-nano-banana-2.1');
   const [imgSize, setImgSize] = useState<(typeof IMAGE_SIZES)[number]>('1K');
   const [imgAspect, setImgAspect] = useState<(typeof ASPECT_RATIOS)[number]>('16:9');
   const [editSourceImg, setEditSourceImg] = useState<{
     base64: string;
     mime: string;
+    name?: string;
   } | null>(null);
   const [imgLoading, setImgLoading] = useState(false);
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
@@ -82,8 +98,30 @@ export const GeminiMultimediaStudio: React.FC = () => {
     setImgPrompt(pendingImageGeneratorDraft.prompt);
     setImgAspect(pendingImageGeneratorDraft.aspectRatio);
     setLoadedFromScreenTitle(pendingImageGeneratorDraft.screenTitle || 'Mapa Ekranów');
+    if (pendingImageGeneratorDraft.websiteGuidelines) {
+      setWebsiteBuildGuidelines(pendingImageGeneratorDraft.websiteGuidelines);
+    }
+    if (pendingImageGeneratorDraft.sourceImage) {
+      setEditSourceImg(pendingImageGeneratorDraft.sourceImage);
+    }
+    if (
+      Array.isArray(pendingImageGeneratorDraft.styleReferences) &&
+      pendingImageGeneratorDraft.styleReferences.length > 0 &&
+      frontendStyleReferences.length === 0
+    ) {
+      addFrontendStyleReferences(pendingImageGeneratorDraft.styleReferences);
+    }
+    if (typeof pendingImageGeneratorDraft.detectedButtonCount === 'number') {
+      setDetectedButtonCount(pendingImageGeneratorDraft.detectedButtonCount);
+    }
     setPendingImageGeneratorDraft(null);
-  }, [pendingImageGeneratorDraft, setPendingImageGeneratorDraft]);
+  }, [
+    pendingImageGeneratorDraft,
+    setPendingImageGeneratorDraft,
+    setWebsiteBuildGuidelines,
+    frontendStyleReferences.length,
+    addFrontendStyleReferences,
+  ]);
 
   // Video Omni Flash State
   const [vidPrompt, setVidPrompt] = useState(
@@ -98,19 +136,24 @@ export const GeminiMultimediaStudio: React.FC = () => {
   const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
   const [vidError, setVidError] = useState<string | null>(null);
 
-  // Image Analysis State (gemini-4-argon)
+  // Image Analysis State (Gemini Vision)
   const [analyzeSource, setAnalyzeSource] = useState<{
     base64: string;
     mime: string;
+    name?: string;
   } | null>(null);
   const [analyzeLoading, setAnalyzeLoading] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<{
     summary: string;
+    recognizedElements?: string[];
+    recognizedTexts?: string[];
+    detectedColors?: string[];
     suggestedMaterial: HapticMaterialType;
     suggestedHardness: number;
     suggestedGlassBlur: number;
     suggestedElevation: number;
     extractedPrompt: string;
+    modelUsed?: string;
   } | null>(null);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
 
@@ -144,41 +187,108 @@ export const GeminiMultimediaStudio: React.FC = () => {
 
   const readFileAsBase64 = (
     file: File,
-    cb: (res: { base64: string; mime: string }) => void
+    cb: (res: { base64: string; mime: string; name?: string }) => void
   ) => {
     const reader = new FileReader();
-    reader.onload = () => {
-      cb({
-        base64: String(reader.result),
-        mime: file.type || 'image/png',
-      });
+    reader.onload = async () => {
+      const raw = String(reader.result || '');
+      try {
+        const optimized = await compressImageDataUrlForApi(raw, 1024, 0.85);
+        cb({
+          base64: optimized.dataUrl,
+          mime: optimized.mimeType || 'image/jpeg',
+          name: file.name,
+        });
+      } catch {
+        cb({
+          base64: raw,
+          mime: file.type || 'image/jpeg',
+          name: file.name,
+        });
+      }
     };
     reader.readAsDataURL(file);
+  };
+
+  const handleUploadStyleRefs = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const remainingSlots = Math.max(0, 5 - frontendStyleReferences.length);
+    if (remainingSlots <= 0) return;
+    const defaultRoles = [
+      'styl-obrazu',
+      'glebia-swiatlo',
+      'tematyka-klimat',
+      'kompozycja-ui',
+      'styl-obrazu',
+    ] as const;
+
+    const toProcess = Array.from(files).slice(0, remainingSlots);
+    const loaded = await Promise.all(
+      toProcess.map(
+        (file, idx) =>
+          new Promise<{
+            id: string;
+            name: string;
+            mimeType: string;
+            dataUrl: string;
+            role: (typeof defaultRoles)[number];
+            sizeKb: number;
+          } | null>((resolve) => {
+            const reader = new FileReader();
+            reader.onload = () =>
+              resolve({
+                id: `style_ref_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 6)}`,
+                name: file.name,
+                mimeType: file.type || 'image/jpeg',
+                dataUrl: String(reader.result),
+                role: defaultRoles[(frontendStyleReferences.length + idx) % defaultRoles.length],
+                sizeKb: Math.max(1, Math.round(file.size / 1024)),
+              });
+            reader.onerror = () => resolve(null);
+            reader.readAsDataURL(file);
+          })
+      )
+    );
+    const valid = loaded.filter((item): item is NonNullable<typeof item> => Boolean(item));
+    if (valid.length > 0) {
+      addFrontendStyleReferences(valid);
+    }
   };
 
   const handleGenerateOrEditImage = async (e: React.FormEvent) => {
     e.preventDefault();
     setImgLoading(true);
     setImgError(null);
+    setApprovedNotice(null);
     try {
       const resp = await studioApiFetch('/api/gemini/generate-image', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt: imgPrompt,
+          websiteGuidelines: websiteBuildGuidelines,
+          detectedButtonCount: detectedButtonCount ?? frontendButtonAnalysis?.buttonCount,
           model: imgModel,
           imageSize: imgSize,
           aspectRatio: imgAspect,
           sourceImageBase64: editSourceImg?.base64,
           sourceMimeType: editSourceImg?.mime,
+          styleReferenceImages: frontendStyleReferences.slice(0, 5).map((ref) => ({
+            base64: ref.dataUrl,
+            mimeType: ref.mimeType,
+            role: ref.role,
+            name: ref.name,
+          })),
         }),
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Błąd generowania obrazu.');
       setGeneratedImage(data.imageUrl);
       await addMediaAsset({
-        title: editSourceImg ? 'Edycja Obrazu Studio' : 'Render Obrazu Gemini',
-        subtitle: `${imgModel === 'gemini-3-pro-image-preview' ? 'Pro Image' : 'Nano Banana 2.1'} · ${imgAspect} · ${imgSize}`,
+        title: editSourceImg
+          ? 'Przygotowany Frontend AI'
+          : 'Render Obrazu Gemini',
+        subtitle: `${imgModel === 'gemini-3-pro-image-preview' ? 'Pro Image' : imgModel === 'gemini-3.1-flash-lite-image' ? 'Flash Lite Image' : 'Nano Banana 2.1'} · ${imgAspect} · ${imgSize}${frontendStyleReferences.length > 0 ? ` · ${frontendStyleReferences.length} ref.` : ''}`,
         category: 'AI Studio Render',
         mediaType: 'image',
         aspectRatio: imgAspect,
@@ -258,11 +368,21 @@ export const GeminiMultimediaStudio: React.FC = () => {
 
       setAnalysisResult({
         summary: data.summary,
+        recognizedElements: Array.isArray(data.recognizedElements)
+          ? data.recognizedElements
+          : [],
+        recognizedTexts: Array.isArray(data.recognizedTexts)
+          ? data.recognizedTexts
+          : [],
+        detectedColors: Array.isArray(data.detectedColors)
+          ? data.detectedColors
+          : [],
         suggestedMaterial: validMat,
         suggestedHardness: Math.max(0, Math.min(100, Number(data.suggestedHardness) || 74)),
         suggestedGlassBlur: Math.max(6, Math.min(36, Number(data.suggestedGlassBlur) || 20)),
         suggestedElevation: Math.max(4, Math.min(40, Number(data.suggestedElevation) || 20)),
         extractedPrompt: data.extractedPrompt,
+        modelUsed: data.modelUsed,
       });
     } catch (err: unknown) {
       setAnalyzeError(err instanceof Error ? err.message : 'Błąd analizy zdjęcia.');
@@ -438,27 +558,35 @@ export const GeminiMultimediaStudio: React.FC = () => {
         </div>
 
         <form onSubmit={handleGenerateOrEditImage} className="space-y-4">
-          {loadedFromScreenTitle && (
-            <div className="px-3.5 py-2.5 rounded-xl bg-indigo-50/85 dark:bg-emerald-950/80 border border-indigo-200/80 dark:border-emerald-400/30 text-xs text-slate-800 dark:text-emerald-100 flex items-center justify-between gap-2">
-              <span>
-                Załadowano prompt układu przycisków dla ekranu:{' '}
-                <strong className="font-semibold">{loadedFromScreenTitle}</strong>
+          {(loadedFromScreenTitle || detectedButtonCount !== null) && (
+            <div className="px-3.5 py-2.5 rounded-xl bg-indigo-50/85 dark:bg-emerald-950/80 border border-indigo-200/80 dark:border-emerald-400/30 text-xs text-slate-800 dark:text-emerald-100 flex flex-wrap items-center justify-between gap-2">
+              <span className="font-mono tabular-nums">
+                {loadedFromScreenTitle
+                  ? `Wklejono prompt z: ${loadedFromScreenTitle}`
+                  : 'Kontekst analizy obrazu'}
+                {detectedButtonCount !== null
+                  ? ` · Wykryto przycisków: ${detectedButtonCount}`
+                  : ''}
               </span>
-              <button
-                type="button"
-                onClick={() => setLoadedFromScreenTitle(null)}
-                className="text-slate-500 dark:text-emerald-300 hover:underline cursor-pointer shrink-0"
-              >
-                Ukryj
-              </button>
+              {loadedFromScreenTitle && (
+                <button
+                  type="button"
+                  onClick={() => setLoadedFromScreenTitle(null)}
+                  className="text-slate-500 dark:text-emerald-300 hover:underline cursor-pointer shrink-0"
+                >
+                  Ukryj
+                </button>
+              )}
             </div>
           )}
+
           {/* Model Switch */}
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
             {(
               [
-                ['gemini-nano-banana-2.1', 'Nano Banana 2.1 (Tworzenie & Edycja)'],
-                ['gemini-3-pro-image-preview', 'Pro Image Preview (Jakość Studyjna)'],
+                ['gemini-nano-banana-2.1', 'Nano Banana 2.1 (Domyślny)'],
+                ['gemini-3.1-flash-lite-image', 'Flash Lite Image (Szybki)'],
+                ['gemini-3-pro-image-preview', 'Pro Image (Jakość Studyjna)'],
               ] as const
             ).map(([mId, label]) => (
               <button
@@ -521,11 +649,13 @@ export const GeminiMultimediaStudio: React.FC = () => {
           </div>
 
           {/* Optional Source Image for Editing */}
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <label className="px-3.5 py-2 rounded-xl bg-white/75 dark:bg-emerald-950/70 border border-slate-200 dark:border-emerald-400/25 text-xs font-medium text-slate-700 dark:text-emerald-100 inline-flex items-center gap-2 cursor-pointer">
-              <Upload className="w-3.5 h-3.5" />
-              <span>
-                {editSourceImg ? 'Zmień obraz źródłowy edycji' : 'Opcjonalnie: prześlij obraz do edycji'}
+              <Upload className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate max-w-[260px]">
+                {editSourceImg
+                  ? `Bazowy obraz: ${editSourceImg.name || 'wgrany frontend'}`
+                  : 'Opcjonalnie: prześlij obraz bazowy frontendu'}
               </span>
               <input
                 type="file"
@@ -543,18 +673,131 @@ export const GeminiMultimediaStudio: React.FC = () => {
                 onClick={() => setEditSourceImg(null)}
                 className="text-xs text-rose-600 dark:text-rose-300 underline cursor-pointer"
               >
-                Usuń obraz źródłowy
+                Usuń obraz bazowy
               </button>
             )}
           </div>
 
-          <textarea
-            rows={3}
-            value={imgPrompt}
-            onChange={(e) => setImgPrompt(e.target.value)}
-            placeholder="Opisz scenę lub instrukcję edycji obrazu..."
-            className="w-full p-3.5 rounded-2xl text-sm bg-white/80 dark:bg-emerald-950/70 border border-slate-200 dark:border-emerald-400/25 text-slate-900 dark:text-emerald-50 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
+          {/* Main Prompt (auto-pasted from Step 2) */}
+          <div className="space-y-1.5">
+            <label
+              htmlFor="gemini-studio-main-prompt"
+              className="block text-xs font-medium text-slate-700 dark:text-emerald-200"
+            >
+              Prompt wygenerowany z obrazu bazowego
+            </label>
+            <textarea
+              id="gemini-studio-main-prompt"
+              rows={3}
+              value={imgPrompt}
+              onChange={(e) => setImgPrompt(e.target.value)}
+              placeholder="Opisz scenę lub wklej 1-klikiem prompt z analizy obrazu frontendu..."
+              className="w-full p-3.5 rounded-2xl text-sm bg-white/80 dark:bg-emerald-950/70 border border-slate-200 dark:border-emerald-400/25 text-slate-900 dark:text-emerald-50 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+
+          {/* Website Build Guidelines */}
+          <div className="space-y-1.5">
+            <label
+              htmlFor="gemini-studio-guidelines"
+              className="block text-xs font-medium text-slate-700 dark:text-emerald-200"
+            >
+              Wytyczne dla budowy strony (układ, kontrast, typografia, hierarchia)
+            </label>
+            <textarea
+              id="gemini-studio-guidelines"
+              rows={2}
+              value={websiteBuildGuidelines}
+              onChange={(e) => setWebsiteBuildGuidelines(e.target.value)}
+              placeholder="Np. Siatka 12 kolumn, wyraźne przyciski CTA, styl matowego szkła, kontrast WCAG AA..."
+              className="w-full p-3 rounded-2xl text-xs bg-white/80 dark:bg-emerald-950/70 border border-slate-200 dark:border-emerald-400/25 text-slate-900 dark:text-emerald-50 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+
+          {/* 3-5 Additional Reference Graphics (Style, Depth & Theme) */}
+          <div className="p-3.5 rounded-2xl bg-white/65 dark:bg-emerald-950/55 border border-slate-200/80 dark:border-emerald-400/20 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-xs">
+                <span className="font-semibold text-slate-900 dark:text-emerald-50">
+                  Dodatkowe grafiki referencyjne (styl, głębia, tematyka)
+                </span>
+                <span className="mx-1.5 text-slate-400" aria-hidden="true">
+                  ·
+                </span>
+                <span className="font-mono tabular-nums text-slate-600 dark:text-emerald-200/85">
+                  {frontendStyleReferences.length} / 5 (zalecane 3–5)
+                </span>
+              </div>
+
+              <label
+                className={`px-3 py-1.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
+                  frontendStyleReferences.length >= 5
+                    ? 'bg-slate-200 dark:bg-emerald-900/40 text-slate-500 pointer-events-none'
+                    : 'bg-indigo-600 dark:bg-emerald-400 text-white dark:text-emerald-950 hover:opacity-95'
+                }`}
+              >
+                <ImagePlus className="w-3.5 h-3.5 shrink-0" />
+                <span>Dodaj grafiki (max 5)</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  disabled={frontendStyleReferences.length >= 5}
+                  onChange={(e) => {
+                    void handleUploadStyleRefs(e.target.files);
+                    e.target.value = '';
+                  }}
+                  className="hidden"
+                />
+              </label>
+            </div>
+
+            {frontendStyleReferences.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {frontendStyleReferences.map((refImg) => (
+                  <div
+                    key={refImg.id}
+                    className="p-2 rounded-xl bg-white/85 dark:bg-emerald-950/80 border border-slate-200/80 dark:border-emerald-400/20 flex items-center gap-2.5"
+                  >
+                    <img
+                      src={refImg.dataUrl}
+                      alt={refImg.name}
+                      className="w-11 h-11 rounded-lg object-cover shrink-0 border border-slate-200/70 dark:border-emerald-400/25"
+                    />
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <p className="text-[11px] font-medium text-slate-800 dark:text-emerald-100 truncate">
+                        {refImg.name}
+                      </p>
+                      <select
+                        aria-label={`Rola grafiki ${refImg.name}`}
+                        value={refImg.role}
+                        onChange={(e) =>
+                          updateFrontendStyleReferenceRole(
+                            refImg.id,
+                            e.target.value as StyleReferenceRole
+                          )
+                        }
+                        className="w-full h-6 px-1.5 rounded-md text-[11px] bg-white dark:bg-emerald-900 border border-slate-200/80 dark:border-emerald-400/25 text-slate-800 dark:text-emerald-100"
+                      >
+                        <option value="styl-obrazu">Styl obrazu</option>
+                        <option value="glebia-swiatlo">Głębia i światło</option>
+                        <option value="tematyka-klimat">Tematyka i klimat</option>
+                        <option value="kompozycja-ui">Kompozycja UI</option>
+                      </select>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeFrontendStyleReference(refImg.id)}
+                      aria-label={`Usuń grafikę ${refImg.name}`}
+                      className="p-1.5 text-slate-500 hover:text-rose-600 dark:text-emerald-200/70 cursor-pointer shrink-0"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
 
           {imgError && (
             <p className="text-xs text-rose-600 dark:text-rose-300">{imgError}</p>
@@ -568,25 +811,52 @@ export const GeminiMultimediaStudio: React.FC = () => {
             {imgLoading ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" />
-                <span>Renderowanie zasobu {imgSize}...</span>
+                <span>Renderowanie frontendu {imgSize}...</span>
               </>
             ) : (
               <>
                 <Sparkles className="w-4 h-4" />
-                <span>{editSourceImg ? 'Edytuj obraz i zapisz w bibliotece' : 'Wygeneruj obraz i zapisz w bibliotece'}</span>
+                <span>
+                  {editSourceImg
+                    ? 'Wygeneruj przygotowany frontend z wytycznych i grafik'
+                    : 'Wygeneruj obraz i zapisz w bibliotece'}
+                </span>
               </>
             )}
           </button>
         </form>
 
         {generatedImage && (
-          <div className="pt-2">
+          <div className="pt-2 space-y-3">
             <ProgressiveImage
               src={generatedImage}
               alt={imgPrompt}
               aspectClass="aspect-video"
               className="rounded-2xl border border-white/80 dark:border-emerald-400/25"
             />
+            <button
+              type="button"
+              onClick={() => {
+                applyPreparedFrontendToWorkspace({
+                  imageDataUrl: generatedImage,
+                  fileName: 'przygotowany-frontend-gemini.png',
+                  promptUsed: imgPrompt,
+                  analysis: frontendButtonAnalysis,
+                });
+                setApprovedNotice(
+                  'Zatwierdzono wygenerowany obraz jako przygotowany frontend. Krok 4 (praca nad elementami interaktywnymi) jest teraz odblokowany na Stronie Startowej.'
+                );
+              }}
+              className="w-full py-2.5 px-4 rounded-xl bg-indigo-600 dark:bg-emerald-500 text-white dark:text-emerald-950 text-xs font-semibold inline-flex items-center justify-center gap-2 hover:opacity-95 cursor-pointer whitespace-nowrap"
+            >
+              <Check className="w-4 h-4 shrink-0" />
+              <span>Zatwierdź jako przygotowany frontend (odblokuj Krok 4)</span>
+            </button>
+            {approvedNotice && (
+              <p className="text-xs text-emerald-700 dark:text-emerald-300">
+                {approvedNotice}
+              </p>
+            )}
           </div>
         )}
       </section>
@@ -701,7 +971,7 @@ export const GeminiMultimediaStudio: React.FC = () => {
         )}
       </section>
 
-      {/* 3. Image Understanding Analyzer (gemini-4-argon) */}
+      {/* 3. Image Understanding Analyzer (Gemini Vision) */}
       <section
         style={cardSurfaceStyle}
         className="lg:col-span-6 p-6 sm:p-8 border border-white/80 dark:border-emerald-400/20 space-y-5"
@@ -709,12 +979,12 @@ export const GeminiMultimediaStudio: React.FC = () => {
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="text-xs text-slate-500 dark:text-emerald-300/80 flex items-center gap-1.5">
-              <span>Gemini 4 Argon</span>
+              <span>Gemini Vision</span>
               <span aria-hidden="true">·</span>
-              <span>Analiza Zdjęć i Ekstrakcja Stylu</span>
+              <span>Rozpoznawanie Obrazów, Tekstów i Stylu</span>
             </div>
             <h3 className="text-xl font-semibold text-slate-900 dark:text-emerald-50 mt-1">
-              Skaner Materiału, Cieni i Szkła
+              Skaner Grafiki, Elementów UI i Materiału
             </h3>
           </div>
           <ScanEye className="w-5 h-5 text-indigo-600 dark:text-emerald-300 shrink-0" />
@@ -723,13 +993,22 @@ export const GeminiMultimediaStudio: React.FC = () => {
         <div className="flex flex-wrap items-center gap-3">
           <label className="px-4 py-2.5 rounded-xl bg-white/80 dark:bg-emerald-950/75 border border-slate-200 dark:border-emerald-400/25 text-xs font-medium text-slate-800 dark:text-emerald-100 inline-flex items-center gap-2 cursor-pointer">
             <Upload className="w-4 h-4" />
-            <span>Wybierz zdjęcie do analizy</span>
+            <span>
+              {analyzeSource?.name
+                ? `Zmień grafikę (${analyzeSource.name})`
+                : 'Wybierz grafikę do rozpoznania'}
+            </span>
             <input
               type="file"
               accept="image/*"
               onChange={(e) => {
                 const f = e.target.files?.[0];
-                if (f) readFileAsBase64(f, setAnalyzeSource);
+                if (f) {
+                  setAnalysisResult(null);
+                  setAnalyzeError(null);
+                  readFileAsBase64(f, setAnalyzeSource);
+                }
+                e.target.value = '';
               }}
               className="hidden"
             />
@@ -744,40 +1023,112 @@ export const GeminiMultimediaStudio: React.FC = () => {
             {analyzeLoading ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" />
-                <span>Analizowanie z Gemini 4 Argon...</span>
+                <span>Rozpoznawanie grafiki...</span>
               </>
             ) : (
-              <span>Przeanalizuj strukturę UI</span>
+              <span>Rozpoznaj zawartość grafiki</span>
             )}
           </button>
         </div>
+
+        {analyzeSource && (
+          <div className="rounded-2xl overflow-hidden border border-slate-200/80 dark:border-emerald-400/20 bg-slate-100/70 dark:bg-emerald-950/70 p-1.5 flex items-center justify-center">
+            <img
+              src={analyzeSource.base64}
+              alt={analyzeSource.name || 'Podgląd grafiki do analizy'}
+              className="max-h-56 max-w-full w-auto h-auto rounded-xl block"
+            />
+          </div>
+        )}
 
         {analyzeError && (
           <p className="text-xs text-rose-600 dark:text-rose-300">{analyzeError}</p>
         )}
 
         {analysisResult && (
-          <div className="p-4 rounded-2xl bg-white/60 dark:bg-emerald-950/55 border border-slate-200/80 dark:border-emerald-400/20 space-y-3">
-            <p className="text-xs text-slate-700 dark:text-emerald-100 leading-relaxed">
+          <div className="p-4 rounded-2xl bg-white/65 dark:bg-emerald-950/60 border border-slate-200/80 dark:border-emerald-400/20 space-y-3">
+            <p className="text-xs text-slate-800 dark:text-emerald-100 leading-relaxed">
               {analysisResult.summary}
             </p>
+
+            {analysisResult.recognizedElements &&
+              analysisResult.recognizedElements.length > 0 && (
+                <div className="text-[11px] text-slate-700 dark:text-emerald-200/90">
+                  <span className="font-semibold text-slate-900 dark:text-emerald-50">
+                    Rozpoznane elementy:{' '}
+                  </span>
+                  {analysisResult.recognizedElements.join(' · ')}
+                </div>
+              )}
+
+            {analysisResult.recognizedTexts &&
+              analysisResult.recognizedTexts.length > 0 && (
+                <div className="text-[11px] text-slate-700 dark:text-emerald-200/90">
+                  <span className="font-semibold text-slate-900 dark:text-emerald-50">
+                    Odczytane napisy:{' '}
+                  </span>
+                  {analysisResult.recognizedTexts.join(' · ')}
+                </div>
+              )}
+
+            {analysisResult.detectedColors &&
+              analysisResult.detectedColors.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] font-semibold text-slate-900 dark:text-emerald-50">
+                    Kolory:
+                  </span>
+                  {analysisResult.detectedColors.map((hex) => (
+                    <span
+                      key={hex}
+                      className="inline-flex items-center gap-1 text-[11px] font-mono text-slate-700 dark:text-emerald-200"
+                    >
+                      <span
+                        style={{ backgroundColor: hex }}
+                        className="w-3.5 h-3.5 rounded border border-slate-300 dark:border-emerald-400/40 inline-block"
+                      />
+                      {hex}
+                    </span>
+                  ))}
+                </div>
+              )}
+
             <div className="text-xs font-mono tabular-nums text-slate-600 dark:text-emerald-300">
               Materiał: {analysisResult.suggestedMaterial} · Twardość: {analysisResult.suggestedHardness} Sh · Rozmycie: {analysisResult.suggestedGlassBlur}px
+              {analysisResult.modelUsed ? ` · ${analysisResult.modelUsed}` : ''}
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                selectMaterialProfile(analysisResult.suggestedMaterial, { silent: true });
-                updateHaptic({ materialHardness: analysisResult.suggestedHardness });
-                updateDepth({
-                  glassBlur: analysisResult.suggestedGlassBlur,
-                  elevation: analysisResult.suggestedElevation,
-                });
-              }}
-              className="py-2 px-3.5 rounded-xl bg-indigo-600 dark:bg-emerald-400 text-white dark:text-emerald-950 text-xs font-semibold cursor-pointer whitespace-nowrap"
-            >
-              Zastosuj rozpoznane parametry w całym studiu
-            </button>
+
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  selectMaterialProfile(analysisResult.suggestedMaterial, { silent: true });
+                  updateHaptic({ materialHardness: analysisResult.suggestedHardness });
+                  updateDepth({
+                    glassBlur: analysisResult.suggestedGlassBlur,
+                    elevation: analysisResult.suggestedElevation,
+                  });
+                }}
+                className="py-2 px-3.5 rounded-xl bg-indigo-600 dark:bg-emerald-400 text-white dark:text-emerald-950 text-xs font-semibold cursor-pointer whitespace-nowrap"
+              >
+                Zastosuj rozpoznane parametry w studiu
+              </button>
+
+              {analysisResult.extractedPrompt && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setImgPrompt(analysisResult.extractedPrompt);
+                    if (analyzeSource) {
+                      setEditSourceImg(analyzeSource);
+                    }
+                    setLoadedFromScreenTitle(analyzeSource?.name || 'Skaner Grafiki');
+                  }}
+                  className="py-2 px-3.5 rounded-xl bg-white/85 dark:bg-emerald-900/75 border border-slate-200 dark:border-emerald-400/25 text-slate-800 dark:text-emerald-100 text-xs font-medium cursor-pointer whitespace-nowrap"
+                >
+                  Wklej prompt do Generatora Grafik
+                </button>
+              )}
+            </div>
           </div>
         )}
       </section>
